@@ -15,7 +15,23 @@ export default function PinWidget({ spins, soundOn, onAddSpin, onUnpin }: PinWid
   const [input, setInput] = useState('');
   const [pos, setPos] = useState({ x: 0, y: 0 });
   const dragRef = useRef<{ startX: number; startY: number; baseX: number; baseY: number } | null>(null);
-  const state = useMemo(() => calculateRecords(spins), [spins]);
+
+  const rawState = useMemo(() => {
+    try {
+      return calculateRecords(spins);
+    } catch {
+      return null;
+    }
+  }, [spins]);
+
+  const safe = {
+    isNextPlay: Boolean(rawState?.isNextPlay),
+    nextPettan: rawState?.nextPettan ?? '-',
+    nextMult: rawState?.nextMult ?? 1,
+    totalUnit: typeof rawState?.totalUnit === 'number' ? rawState.totalUnit : 0,
+    hits: typeof rawState?.hits === 'number' ? rawState.hits : 0,
+    misses: typeof rawState?.misses === 'number' ? rawState.misses : 0,
+  };
 
   const submit = () => {
     const val = parseInt(input, 10);
@@ -55,12 +71,11 @@ export default function PinWidget({ spins, soundOn, onAddSpin, onUnpin }: PinWid
       <div
         style={{ transform: `translate(${pos.x}px, ${pos.y}px)` }}
         className={`pointer-events-auto w-[156px] rounded-xl border bg-gradient-to-b from-[#141f33] to-[#0b1220] shadow-[0_12px_32px_rgba(0,0,0,0.75)] select-none ${
-          state.isNextPlay
+          safe.isNextPlay
             ? 'border-[#35df91] shadow-[0_0_18px_rgba(53,223,145,0.28)]'
             : 'border-[#2b3b5b]'
         }`}
       >
-        {/* Compact drag header */}
         <div
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
@@ -70,7 +85,7 @@ export default function PinWidget({ spins, soundOn, onAddSpin, onUnpin }: PinWid
           <div className="flex items-center gap-1 min-w-0">
             <span
               className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-                state.isNextPlay ? 'bg-[#35df91] animate-pulse' : 'bg-[#ffc45c]'
+                safe.isNextPlay ? 'bg-[#35df91] animate-pulse' : 'bg-[#ffc45c]'
               }`}
             />
             <span className="text-[#ffdf91] font-black tracking-[0.12em] text-[10px] truncate">
@@ -85,10 +100,7 @@ export default function PinWidget({ spins, soundOn, onAddSpin, onUnpin }: PinWid
             >
               <Expand className="w-3 h-3" />
             </button>
-            <span
-              title={soundOn ? 'Sound ON' : 'Sound OFF'}
-              className="text-[#9baac2] p-0.5 pointer-events-none"
-            >
+            <span title={soundOn ? 'Sound ON' : 'Sound OFF'} className="text-[#9baac2] p-0.5 pointer-events-none">
               {soundOn ? <Volume2 className="w-3 h-3" /> : <VolumeX className="w-3 h-3" />}
             </span>
             <button
@@ -102,33 +114,27 @@ export default function PinWidget({ spins, soundOn, onAddSpin, onUnpin }: PinWid
         </div>
 
         <div className="p-1.5 space-y-1.5">
-          {/* Pettan + Multiplier + Unit */}
           <div className="grid grid-cols-3 gap-1 text-center">
             <div className="bg-[#080d17] border border-[#2b3b5b] rounded-lg py-1">
               <div className="text-[7px] text-[#9baac2] font-bold">PET</div>
-              <div className="text-sm font-black text-[#35df91] leading-none mt-0.5">
-                {state.nextPettan}
-              </div>
+              <div className="text-sm font-black text-[#35df91] leading-none mt-0.5">{safe.nextPettan}</div>
             </div>
             <div className="bg-[#080d17] border border-[#2b3b5b] rounded-lg py-1">
               <div className="text-[7px] text-[#9baac2] font-bold">GUNA</div>
-              <div className="text-sm font-black text-[#ffdf91] leading-none mt-0.5">
-                {state.nextMult}x
-              </div>
+              <div className="text-sm font-black text-[#ffdf91] leading-none mt-0.5">{safe.nextMult}x</div>
             </div>
             <div className="bg-[#080d17] border border-[#2b3b5b] rounded-lg py-1">
               <div className="text-[7px] text-[#9baac2] font-bold">UNIT</div>
               <div
                 className={`text-sm font-black leading-none mt-0.5 ${
-                  state.totalUnit >= 0 ? 'text-[#35df91]' : 'text-[#ff6474]'
+                  safe.totalUnit >= 0 ? 'text-[#35df91]' : 'text-[#ff6474]'
                 }`}
               >
-                {state.totalUnit > 0 ? `+${state.totalUnit}` : state.totalUnit}
+                {safe.totalUnit > 0 ? `+${safe.totalUnit}` : safe.totalUnit}
               </div>
             </div>
           </div>
 
-          {/* Compact Spin Input + OK */}
           <div className="flex gap-1">
             <input
               type="number"
@@ -149,7 +155,6 @@ export default function PinWidget({ spins, soundOn, onAddSpin, onUnpin }: PinWid
             </button>
           </div>
 
-          {/* Last Spin + H/M */}
           <div className="flex items-center justify-between text-[9px] text-[#9baac2] font-semibold px-0.5">
             <span>
               L:{' '}
@@ -158,12 +163,10 @@ export default function PinWidget({ spins, soundOn, onAddSpin, onUnpin }: PinWid
               </b>
             </span>
             <span>
-              <b className="text-[#35df91]">{state.hits}</b>/
-              <b className="text-[#ff6474]">{state.misses}</b>
+              <b className="text-[#35df91]">{safe.hits}</b>/<b className="text-[#ff6474]">{safe.misses}</b>
             </span>
           </div>
 
-          {/* Last 5 Spins */}
           <div className="grid grid-cols-5 gap-0.5">
             {spins.slice(-5).reverse().map((n, i) => (
               <div
