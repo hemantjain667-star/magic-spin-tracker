@@ -20,7 +20,9 @@ jobs:
           cache: npm
 
       - name: Install dependencies
-        run: npm ci
+        run: |
+          npm ci
+          npm install --no-save @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6
 
       - name: Build web app
         run: |
@@ -59,7 +61,6 @@ jobs:
 
       - name: Setup Capacitor Android
         run: |
-          npm install @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6
           node -e "
             const fs = require('fs');
             fs.writeFileSync('capacitor.config.json', JSON.stringify({
