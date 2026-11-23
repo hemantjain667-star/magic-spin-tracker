@@ -1,7 +1,7 @@
 import { useMemo, useRef, useState } from 'react';
 import { PinOff, Volume2, VolumeX, Expand } from 'lucide-react';
 import { calculateRecords } from '@/lib/game';
-import { playClick, playMelody } from '@/lib/sound';
+import { playClick } from '@/lib/sound';
 import { vibrate } from '@/lib/haptics';
 
 interface PinWidgetProps {
@@ -34,11 +34,13 @@ export default function PinWidget({ spins, soundOn, onAddSpin, onUnpin }: PinWid
     dragRef.current = { startX: e.clientX, startY: e.clientY, baseX: pos.x, baseY: pos.y };
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
   };
+
   const onPointerMove = (e: React.PointerEvent) => {
     const d = dragRef.current;
     if (!d) return;
     setPos({ x: d.baseX + e.clientX - d.startX, y: d.baseY + e.clientY - d.startY });
   };
+
   const onPointerUp = () => {
     dragRef.current = null;
   };
@@ -46,65 +48,88 @@ export default function PinWidget({ spins, soundOn, onAddSpin, onUnpin }: PinWid
   const lastSpin = spins.length ? spins[spins.length - 1] : null;
 
   return (
-    <div className="min-h-screen bg-[#060a13]/95 flex items-center justify-center p-4" style={{ fontFamily: 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif' }}>
+    <div
+      className="fixed inset-0 pointer-events-none flex items-center justify-center p-2 z-50"
+      style={{ fontFamily: 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif' }}
+    >
       <div
         style={{ transform: `translate(${pos.x}px, ${pos.y}px)` }}
-        className={`w-[300px] rounded-2xl border bg-gradient-to-b from-[#141f33] to-[#0b1220] shadow-[0_20px_60px_rgba(0,0,0,0.7)] select-none ${
+        className={`pointer-events-auto w-[156px] rounded-xl border bg-gradient-to-b from-[#141f33] to-[#0b1220] shadow-[0_12px_32px_rgba(0,0,0,0.75)] select-none ${
           state.isNextPlay
-            ? 'border-[#35df91] shadow-[0_0_30px_rgba(53,223,145,0.25)]'
+            ? 'border-[#35df91] shadow-[0_0_18px_rgba(53,223,145,0.28)]'
             : 'border-[#2b3b5b]'
         }`}
       >
-        {/* drag handle / header */}
+        {/* Compact drag header */}
         <div
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
-          className="flex items-center justify-between px-3 py-2 cursor-grab active:cursor-grabbing border-b border-[#2b3b5b]/60 touch-none"
+          className="flex items-center justify-between px-2 py-1 cursor-grab active:cursor-grabbing border-b border-[#2b3b5b]/60 touch-none"
         >
-          <div className="flex items-center gap-1.5">
-            <span className={`w-2 h-2 rounded-full ${state.isNextPlay ? 'bg-[#35df91] animate-pulse' : 'bg-[#ffc45c]'}`} />
-            <span className="text-[#ffdf91] font-black tracking-[0.2em] text-xs">MAGIC</span>
-            <span className={`text-[9px] font-black px-1.5 py-0.5 rounded-full border ${
-              state.isNextPlay ? 'text-[#35df91] border-[#35df91] bg-[#35df9120]' : 'text-[#ffc45c] border-[#ffc45c] bg-[#ffc45c15]'
-            }`}>
-              {state.isNextPlay ? 'PLAY NOW' : 'BASE'}
+          <div className="flex items-center gap-1 min-w-0">
+            <span
+              className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                state.isNextPlay ? 'bg-[#35df91] animate-pulse' : 'bg-[#ffc45c]'
+              }`}
+            />
+            <span className="text-[#ffdf91] font-black tracking-[0.12em] text-[10px] truncate">
+              MAGIC
             </span>
           </div>
-          <div className="flex gap-1">
-            <button onClick={onUnpin} title="Full screen wapas kholein" className="text-[#9baac2] hover:text-white p-1 active:scale-90 transition">
-              <Expand className="w-3.5 h-3.5" />
+          <div className="flex items-center gap-0.5 shrink-0">
+            <button
+              onClick={onUnpin}
+              title="Full screen"
+              className="text-[#9baac2] hover:text-white p-0.5 active:scale-90 transition"
+            >
+              <Expand className="w-3 h-3" />
             </button>
-            <button title={soundOn ? 'Sound ON' : 'Sound OFF'} className="text-[#9baac2] p-1 pointer-events-none">
-              {soundOn ? <Volume2 className="w-3.5 h-3.5" /> : <VolumeX className="w-3.5 h-3.5" />}
-            </button>
-            <button onClick={onUnpin} title="Unpin" className="text-[#9baac2] hover:text-white p-1 active:scale-90 transition">
-              <PinOff className="w-3.5 h-3.5" />
+            <span
+              title={soundOn ? 'Sound ON' : 'Sound OFF'}
+              className="text-[#9baac2] p-0.5 pointer-events-none"
+            >
+              {soundOn ? <Volume2 className="w-3 h-3" /> : <VolumeX className="w-3 h-3" />}
+            </span>
+            <button
+              onClick={onUnpin}
+              title="Unpin"
+              className="text-[#9baac2] hover:text-white p-0.5 active:scale-90 transition"
+            >
+              <PinOff className="w-3 h-3" />
             </button>
           </div>
         </div>
 
-        <div className="p-3 space-y-2.5">
-          {/* Pettan + multiplier */}
-          <div className="grid grid-cols-3 gap-2 text-center">
-            <div className="bg-[#080d17] border border-[#2b3b5b] rounded-xl py-2">
-              <div className="text-[8px] text-[#9baac2] font-black tracking-widest">PETTAN</div>
-              <div className="text-2xl font-black text-[#35df91] leading-tight">{state.nextPettan}</div>
+        <div className="p-1.5 space-y-1.5">
+          {/* Pettan + Multiplier + Unit */}
+          <div className="grid grid-cols-3 gap-1 text-center">
+            <div className="bg-[#080d17] border border-[#2b3b5b] rounded-lg py-1">
+              <div className="text-[7px] text-[#9baac2] font-bold">PET</div>
+              <div className="text-sm font-black text-[#35df91] leading-none mt-0.5">
+                {state.nextPettan}
+              </div>
             </div>
-            <div className="bg-[#080d17] border border-[#2b3b5b] rounded-xl py-2">
-              <div className="text-[8px] text-[#9baac2] font-black tracking-widest">KITNA GUNA</div>
-              <div className="text-2xl font-black text-[#ffdf91] leading-tight">{state.nextMult}x</div>
+            <div className="bg-[#080d17] border border-[#2b3b5b] rounded-lg py-1">
+              <div className="text-[7px] text-[#9baac2] font-bold">GUNA</div>
+              <div className="text-sm font-black text-[#ffdf91] leading-none mt-0.5">
+                {state.nextMult}x
+              </div>
             </div>
-            <div className="bg-[#080d17] border border-[#2b3b5b] rounded-xl py-2">
-              <div className="text-[8px] text-[#9baac2] font-black tracking-widest">UNIT</div>
-              <div className={`text-2xl font-black leading-tight ${state.totalUnit >= 0 ? 'text-[#35df91]' : 'text-[#ff6474]'}`}>
-                {state.totalUnit > 0 ? '+' : ''}{state.totalUnit}
+            <div className="bg-[#080d17] border border-[#2b3b5b] rounded-lg py-1">
+              <div className="text-[7px] text-[#9baac2] font-bold">UNIT</div>
+              <div
+                className={`text-sm font-black leading-none mt-0.5 ${
+                  state.totalUnit >= 0 ? 'text-[#35df91]' : 'text-[#ff6474]'
+                }`}
+              >
+                {state.totalUnit > 0 ? `+${state.totalUnit}` : state.totalUnit}
               </div>
             </div>
           </div>
 
-          {/* Enter spin */}
-          <div className="flex gap-2">
+          {/* Compact Spin Input + OK */}
+          <div className="flex gap-1">
             <input
               type="number"
               min={0}
@@ -113,35 +138,41 @@ export default function PinWidget({ spins, soundOn, onAddSpin, onUnpin }: PinWid
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && submit()}
-              placeholder="Enter Spin (0-36)"
-              autoFocus
-              className="min-w-0 flex-1 bg-[#080d17] border-[1.5px] border-[#55c7ff] rounded-lg text-white text-lg font-black py-2 px-2 text-center outline-none placeholder:text-[#55c7ff]/50 placeholder:text-xs placeholder:font-semibold"
+              placeholder="0-36"
+              className="min-w-0 flex-1 bg-[#080d17] border border-[#55c7ff] rounded-md text-white text-xs font-black py-1 px-1.5 text-center outline-none placeholder:text-[#55c7ff]/50 placeholder:text-[10px]"
             />
             <button
               onClick={submit}
-              className="bg-gradient-to-br from-[#0891b2] to-[#2563eb] rounded-lg px-4 text-xs font-black tracking-wider text-white active:scale-95 transition-transform"
+              className="bg-gradient-to-br from-[#0891b2] to-[#2563eb] rounded-md px-2 text-[10px] font-black text-white active:scale-95 transition-transform"
             >
-              ENTER
+              GO
             </button>
           </div>
 
-          {/* last spin + last 5 */}
-          <div className="flex items-center justify-between text-[10px] text-[#9baac2] font-semibold px-0.5">
+          {/* Last Spin + H/M */}
+          <div className="flex items-center justify-between text-[9px] text-[#9baac2] font-semibold px-0.5">
             <span>
-              {lastSpin !== null ? (
-                <>LAST SPIN: <b className={lastSpin === 0 ? 'text-[#35df91]' : 'text-white'}>{lastSpin}</b></>
-              ) : (
-                'Koi spin nahi'
-              )}
+              L:{' '}
+              <b className={lastSpin === 0 ? 'text-[#35df91]' : 'text-white'}>
+                {lastSpin !== null ? lastSpin : '-'}
+              </b>
             </span>
             <span>
-              H/M: <b className="text-[#35df91]">{state.hits}</b>/<b className="text-[#ff6474]">{state.misses}</b>
+              <b className="text-[#35df91]">{state.hits}</b>/
+              <b className="text-[#ff6474]">{state.misses}</b>
             </span>
           </div>
-          <div className="grid grid-cols-5 gap-1.5">
+
+          {/* Last 5 Spins */}
+          <div className="grid grid-cols-5 gap-0.5">
             {spins.slice(-5).reverse().map((n, i) => (
-              <div key={`${spins.length - i}-${n}`} className="bg-[#080f1d] border border-[#344766] rounded-lg py-1 text-center">
-                <div className={`text-sm font-black ${n === 0 ? 'text-[#35df91]' : 'text-white'}`}>{n}</div>
+              <div
+                key={`${spins.length - i}-${n}`}
+                className="bg-[#080f1d] border border-[#344766] rounded py-0.5 text-center"
+              >
+                <div className={`text-[10px] font-black leading-tight ${n === 0 ? 'text-[#35df91]' : 'text-white'}`}>
+                  {n}
+                </div>
               </div>
             ))}
           </div>
