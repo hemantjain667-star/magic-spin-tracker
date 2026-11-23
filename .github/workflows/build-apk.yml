@@ -71,6 +71,8 @@ jobs:
           npx cap add android
           node -e "
             const fs = require('fs');
+            const path = require('path');
+
             const p = 'android/variables.gradle';
             if (fs.existsSync(p)) {
               let c = fs.readFileSync(p, 'utf8');
@@ -79,6 +81,7 @@ jobs:
               c = c.replace(/minSdkVersion\s*=\s*\d+/, 'minSdkVersion = 22');
               fs.writeFileSync(p, c);
             }
+
             const appGradle = 'android/app/build.gradle';
             if (fs.existsSync(appGradle)) {
               let g = fs.readFileSync(appGradle, 'utf8');
@@ -93,6 +96,49 @@ jobs:
               \`;
               g = g.replace('android {', fixBlock + '\nandroid {');
               fs.writeFileSync(appGradle, g);
+            }
+
+            const pkgDir = 'android/app/src/main/java/com/hemantjain/magicspintracker';
+            fs.mkdirSync(pkgDir, { recursive: true });
+            for (const fname of ['FloatingOverlayService.java', 'FloatingOverlayPlugin.java']) {
+              const srcFile = path.join('native-overlay', fname);
+              if (fs.existsSync(srcFile)) {
+                fs.copyFileSync(srcFile, path.join(pkgDir, fname));
+              }
+            }
+
+            const mainActivityPath = path.join(pkgDir, 'MainActivity.java');
+            if (fs.existsSync(mainActivityPath)) {
+              let ma = fs.readFileSync(mainActivityPath, 'utf8');
+              if (!ma.includes('registerPlugin(FloatingOverlayPlugin.class)')) {
+                ma = ma.replace(
+                  'super.onCreate(savedInstanceState);',
+                  'super.onCreate(savedInstanceState);\n    registerPlugin(FloatingOverlayPlugin.class);'
+                );
+                fs.writeFileSync(mainActivityPath, ma);
+              }
+            }
+
+            const manifestPath = 'android/app/src/main/AndroidManifest.xml';
+            if (fs.existsSync(manifestPath)) {
+              let mf = fs.readFileSync(manifestPath, 'utf8');
+              if (!mf.includes('android.permission.SYSTEM_ALERT_WINDOW')) {
+                mf = mf.replace(
+                  '<manifest',
+                  '<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\"'
+                );
+                mf = mf.replace(
+                  '<application',
+                  '<uses-permission android:name=\"android.permission.SYSTEM_ALERT_WINDOW\" />\n\n    <application'
+                );
+              }
+              if (!mf.includes('FloatingOverlayService')) {
+                mf = mf.replace(
+                  '</application>',
+                  '        <service\n            android:name=\".FloatingOverlayService\"\n            android:enabled=\"true\"\n            android:exported=\"false\" />\n    </application>'
+                );
+              }
+              fs.writeFileSync(manifestPath, mf);
             }
           "
           npx cap sync android
@@ -114,4 +160,3 @@ jobs:
         with:
           name: magic-spin-tracker-apk
           path: android/app/build/outputs/apk/debug/app-debug.apk
-          
