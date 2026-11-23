@@ -33,13 +33,35 @@ jobs:
                 fs.writeFileSync('vite.config.ts', v);
               }
             }
+            if (fs.existsSync('src/main.tsx')) {
+              let m = fs.readFileSync('src/main.tsx', 'utf8');
+              const errHook = \`
+              function showErr(msg) {
+                const el = document.createElement('pre');
+                el.style.cssText = 'position:fixed;inset:0;z-index:99999;background:#1a0505;color:#ff8080;padding:16px;font-size:12px;white-space:pre-wrap;overflow:auto;';
+                el.textContent = 'APP ERROR:\\n' + msg;
+                document.body.appendChild(el);
+              }
+              window.addEventListener('error', (e) => showErr((e.message || '') + '\\n' + (e.error && e.error.stack ? e.error.stack : '')));
+              window.addEventListener('unhandledrejection', (e) => showErr('Unhandled Promise:\\n' + (e.reason && e.reason.stack ? e.reason.stack : String(e.reason))));
+              \`;
+              m = m.replace(/import \{ StrictMode \}.*?\n/, (match) => match + errHook + '\n');
+              fs.writeFileSync('src/main.tsx', m);
+            }
           "
           npm run build
 
       - name: Setup Capacitor Android
         run: |
           npm install @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6
-          npx cap init "Magic Spin Tracker" com.hemantjain.magicspintracker --web-dir=dist
+          node -e "
+            const fs = require('fs');
+            fs.writeFileSync('capacitor.config.json', JSON.stringify({
+              appId: 'com.hemantjain.magicspintracker',
+              appName: 'Magic Spin Tracker',
+              webDir: 'dist'
+            }, null, 2));
+          "
           npx cap add android
           node -e "
             const fs = require('fs');
