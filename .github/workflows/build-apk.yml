@@ -23,7 +23,18 @@ jobs:
         run: npm ci
 
       - name: Build web app
-        run: npm run build
+        run: |
+          node -e "
+            const fs = require('fs');
+            if (fs.existsSync('vite.config.ts')) {
+              let v = fs.readFileSync('vite.config.ts', 'utf8');
+              if (!v.includes('base:')) {
+                v = v.replace('defineConfig({', \"defineConfig({\n  base: './',\");
+                fs.writeFileSync('vite.config.ts', v);
+              }
+            }
+          "
+          npm run build
 
       - name: Setup Capacitor Android
         run: |
