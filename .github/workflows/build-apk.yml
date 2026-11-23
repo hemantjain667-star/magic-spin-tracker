@@ -112,10 +112,17 @@ jobs:
             if (fs.existsSync(mainActivityPath)) {
               let ma = fs.readFileSync(mainActivityPath, 'utf8');
               if (!ma.includes('registerPlugin(FloatingOverlayPlugin.class)')) {
-                ma = ma.replace(
-                  'super.onCreate(savedInstanceState);',
-                  'super.onCreate(savedInstanceState);\n    registerPlugin(FloatingOverlayPlugin.class);'
-                );
+                if (ma.includes('super.onCreate(savedInstanceState);')) {
+                  ma = ma.replace(
+                    'super.onCreate(savedInstanceState);',
+                    'super.onCreate(savedInstanceState);\n    registerPlugin(FloatingOverlayPlugin.class);'
+                  );
+                } else {
+                  ma = ma.replace(
+                    /onCreate\s*\([^)]*\)\s*\{/,
+                    (match) => match + '\n    registerPlugin(FloatingOverlayPlugin.class);'
+                  );
+                }
                 fs.writeFileSync(mainActivityPath, ma);
               }
             }
@@ -123,14 +130,13 @@ jobs:
             const manifestPath = 'android/app/src/main/AndroidManifest.xml';
             if (fs.existsSync(manifestPath)) {
               let mf = fs.readFileSync(manifestPath, 'utf8');
+              if (!mf.includes('xmlns:android=')) {
+                mf = mf.replace('<manifest', '<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\"');
+              }
               if (!mf.includes('android.permission.SYSTEM_ALERT_WINDOW')) {
                 mf = mf.replace(
-                  '<manifest',
-                  '<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\"'
-                );
-                mf = mf.replace(
-                  '<application',
-                  '<uses-permission android:name=\"android.permission.SYSTEM_ALERT_WINDOW\" />\n\n    <application'
+                  /<application(\s|>)/,
+                  '<uses-permission android:name=\"android.permission.SYSTEM_ALERT_WINDOW\" />\n\n    <application\$1'
                 );
               }
               if (!mf.includes('FloatingOverlayService')) {
