@@ -95,9 +95,9 @@ public class FloatingOverlayPlugin extends Plugin {
         if (numberReceiver != null) {
             try {
                 getContext().unregisterReceiver(numberReceiver);
-            } catch (Exception ignored) {}
+            } catch (Exception ignored) {
+            }
             numberReceiver = null;
         }
-        super.onDestroy();
     }
 }
