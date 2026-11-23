@@ -1,0 +1,76 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@keyframes badgeBlink {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.04);
+    opacity: 0.85;
+  }
+}
+
+@keyframes spinSlow {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.magic-spin-slow {
+  animation: spinSlow 40s linear infinite;
+}
+
+@keyframes shake {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  20%,
+  60% {
+    transform: translateX(-8px);
+  }
+  40%,
+  80% {
+    transform: translateX(8px);
+  }
+}
+
+.shake {
+  animation: shake 0.4s ease-in-out;
+}
+
+/* hide number input spinners */
+input[type='number']::-webkit-outer-spin-button,
+input[type='number']::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input[type='number'] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+/* table styling */
+thead th {
+  position: sticky;
+  top: 0;
+  background: #1a2942;
+  color: #aebdd4;
+  padding: 9px 5px;
+  font-size: 10px;
+  font-weight: 700;
+  border-bottom: 1px solid #2b3b5b;
+  z-index: 2;
+}
+tbody td {
+  padding: 8px 5px;
+  border-bottom: 1px solid #2b3b5b75;
+  font-weight: 600;
+}
