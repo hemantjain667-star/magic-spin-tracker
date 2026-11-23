@@ -24,31 +24,37 @@ jobs:
 
       - name: Build web app
         run: |
-          node -e "
-            const fs = require('fs');
-            if (fs.existsSync('vite.config.ts')) {
-              let v = fs.readFileSync('vite.config.ts', 'utf8');
-              if (!v.includes('base:')) {
-                v = v.replace('defineConfig({', \"defineConfig({\n  base: './',\");
-                fs.writeFileSync('vite.config.ts', v);
-              }
+          cat << 'EOF' > fix-entry.mjs
+          import fs from 'fs';
+
+          if (fs.existsSync('vite.config.ts')) {
+            let v = fs.readFileSync('vite.config.ts', 'utf8');
+            if (!v.includes('base:')) {
+              v = v.replace('defineConfig({', "defineConfig({\n  base: './',");
+              fs.writeFileSync('vite.config.ts', v);
             }
-            if (fs.existsSync('src/main.tsx')) {
-              let m = fs.readFileSync('src/main.tsx', 'utf8');
-              const errHook = \`
-              function showErr(msg) {
-                const el = document.createElement('pre');
-                el.style.cssText = 'position:fixed;inset:0;z-index:99999;background:#1a0505;color:#ff8080;padding:16px;font-size:12px;white-space:pre-wrap;overflow:auto;';
-                el.textContent = 'APP ERROR:\\n' + msg;
-                document.body.appendChild(el);
-              }
-              window.addEventListener('error', (e) => showErr((e.message || '') + '\\n' + (e.error && e.error.stack ? e.error.stack : '')));
-              window.addEventListener('unhandledrejection', (e) => showErr('Unhandled Promise:\\n' + (e.reason && e.reason.stack ? e.reason.stack : String(e.reason))));
-              \`;
-              m = m.replace(/import \{ StrictMode \}.*?\n/, (match) => match + errHook + '\n');
-              fs.writeFileSync('src/main.tsx', m);
-            }
-          "
+          }
+
+          if (fs.existsSync('src/main.tsx')) {
+            let m = fs.readFileSync('src/main.tsx', 'utf8');
+            const hook = [
+              "window.addEventListener('error', (e) => {",
+              "  const pre = document.createElement('pre');",
+              "  pre.style.cssText = 'position:fixed;inset:0;z-index:99999;background:#1a0505;color:#ff8080;padding:16px;font-size:12px;white-space:pre-wrap;overflow:auto;';",
+              "  pre.textContent = ['ERR: ' + (e.message || ''), e.error && e.error.stack ? e.error.stack : ''].join('\\n');",
+              "  document.body.appendChild(pre);",
+              "});",
+              "window.addEventListener('unhandledrejection', (e) => {",
+              "  const pre = document.createElement('pre');",
+              "  pre.style.cssText = 'position:fixed;inset:0;z-index:99999;background:#1a0505;color:#ff8080;padding:16px;font-size:12px;white-space:pre-wrap;overflow:auto;';",
+              "  pre.textContent = ['PROMISE: ', e.reason && e.reason.stack ? e.reason.stack : String(e.reason)].join('\\n');",
+              "  document.body.appendChild(pre);",
+              "});"
+            ].join('\n');
+            fs.writeFileSync('src/main.tsx', hook + '\n' + m);
+          }
+          EOF
+          node fix-entry.mjs
           npm run build
 
       - name: Setup Capacitor Android
@@ -108,3 +114,4 @@ jobs:
         with:
           name: magic-spin-tracker-apk
           path: android/app/build/outputs/apk/debug/app-debug.apk
+          
