@@ -63,13 +63,19 @@ public class FloatingOverlayService extends Service {
         return START_STICKY;
     }
 
+    @SuppressWarnings("deprecation")
+    private int getOverlayWindowType() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            return WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY;
+        }
+        return WindowManager.LayoutParams.TYPE_PHONE;
+    }
+
     private void createOverlay() {
         windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
+        if (windowManager == null) return;
 
-        int layoutFlag = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
-                ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-                : WindowManager.LayoutParams.TYPE_PHONE;
-
+        int layoutFlag = getOverlayWindowType();
         int flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                 | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN;
 
@@ -144,7 +150,7 @@ public class FloatingOverlayService extends Service {
         collapseBtn.setText("—");
         collapseBtn.setTextColor(Color.WHITE);
         collapseBtn.setTextSize(11f);
-        collapseBtn.setBackgroundColor(Color.parseColor("#334155"));
+        collapseBtn.setBackground(makeRoundedBg("#334155", "#475569", 1, 6));
         collapseBtn.setPadding(0, 0, 0, 0);
         collapseBtn.setLayoutParams(new LinearLayout.LayoutParams(dpToPx(28), dpToPx(28)));
         collapseBtn.setOnClickListener(v -> toggleExpand(false));
@@ -162,7 +168,7 @@ public class FloatingOverlayService extends Service {
         goBtn.setTextColor(Color.parseColor("#052E16"));
         goBtn.setTextSize(11f);
         goBtn.setTypeface(Typeface.DEFAULT_BOLD);
-        goBtn.setBackgroundColor(Color.parseColor("#22C55E"));
+        goBtn.setBackground(makeRoundedBg("#22C55E", "#16A34A", 1, 6));
         goBtn.setPadding(0, 0, 0, 0);
         goBtn.setLayoutParams(new LinearLayout.LayoutParams(dpToPx(44), dpToPx(28)));
         goBtn.setOnClickListener(v -> submitSelectedNumber());
@@ -192,7 +198,7 @@ public class FloatingOverlayService extends Service {
             btn.setFocusableInTouchMode(false);
 
             String bgHex = (num == 0) ? "#15803D" : (isRed(num) ? "#B91C1C" : "#1E293B");
-            btn.setBackgroundColor(Color.parseColor(bgHex));
+            btn.setBackground(makeRoundedBg(bgHex, "#334155", 1, 4));
 
             GridLayout.LayoutParams glp = new GridLayout.LayoutParams();
             glp.width = cellW;
@@ -215,7 +221,7 @@ public class FloatingOverlayService extends Service {
         clrBtn.setPadding(0, 0, 0, 0);
         clrBtn.setFocusable(false);
         clrBtn.setFocusableInTouchMode(false);
-        clrBtn.setBackgroundColor(Color.parseColor("#475569"));
+        clrBtn.setBackground(makeRoundedBg("#475569", "#64748B", 1, 4));
         GridLayout.LayoutParams clrLp = new GridLayout.LayoutParams();
         clrLp.width = cellW;
         clrLp.height = cellH;
@@ -247,7 +253,7 @@ public class FloatingOverlayService extends Service {
     }
 
     private void toggleExpand(boolean expand) {
-        if (rootContainer == null || params == null) return;
+        if (rootContainer == null || params == null || windowManager == null) return;
         if (expand) {
             pillView.setVisibility(View.GONE);
             expandedView.setVisibility(View.VISIBLE);
@@ -293,7 +299,11 @@ public class FloatingOverlayService extends Service {
                         }
                         return moved;
                     case MotionEvent.ACTION_UP:
-                        return moved;
+                        if (moved) {
+                            return true;
+                        }
+                        v.performClick();
+                        return true;
                 }
                 return false;
             }
