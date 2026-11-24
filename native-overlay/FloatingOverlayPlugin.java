@@ -1,3 +1,4 @@
+
 package com.hemantjain.magicspintracker;
 
 import android.content.BroadcastReceiver;
@@ -86,6 +87,25 @@ public class FloatingOverlayPlugin extends Plugin {
     public void stopOverlay(PluginCall call) {
         Intent serviceIntent = new Intent(getContext(), FloatingOverlayService.class);
         serviceIntent.setAction(FloatingOverlayService.ACTION_HIDE);
+        getContext().startService(serviceIntent);
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void updateInfo(PluginCall call) {
+        int pattern = call.getInt("pattern", 1);
+        int multiplier = call.getInt("multiplier", 1);
+        boolean isPlaying = call.getBoolean("isPlaying", false);
+
+        pattern = Math.max(0, Math.min(9, pattern));
+        multiplier = Math.max(1, multiplier);
+
+        Intent serviceIntent = new Intent(getContext(), FloatingOverlayService.class);
+        serviceIntent.setAction(FloatingOverlayService.ACTION_UPDATE_INFO);
+        serviceIntent.putExtra(FloatingOverlayService.EXTRA_PATTERN, pattern);
+        serviceIntent.putExtra(FloatingOverlayService.EXTRA_MULTIPLIER, multiplier);
+        serviceIntent.putExtra(FloatingOverlayService.EXTRA_IS_PLAYING, isPlaying);
+
         getContext().startService(serviceIntent);
         call.resolve();
     }
