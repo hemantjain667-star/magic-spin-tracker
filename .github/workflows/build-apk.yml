@@ -28,6 +28,9 @@ jobs:
         run: |
           rm -f package-lock.json
           npm install
+          npm install @capacitor/core@6.1.2 @capacitor/android@6.1.2 @capacitor/cli@6.1.2
+          rm -f capacitor.config.ts
+          printf '{\n  "appId": "com.hemantjain.magicspintracker",\n  "appName": "Magic Spin Tracker",\n  "webDir": "dist",\n  "android": { "allowMixedContent": true }\n}\n' > capacitor.config.json
           npm run build
 
       - name: Add Android platform
@@ -43,36 +46,21 @@ jobs:
           cp native-overlay/FloatingOverlayPlugin.java "$PKG_DIR/"
           cp native-overlay/FloatingOverlayService.java "$PKG_DIR/"
 
-          cat << 'EOF' > "$PKG_DIR/MainActivity.java"
-          package com.hemantjain.magicspintracker;
-
-          import android.os.Bundle;
-          import com.getcapacitor.BridgeActivity;
-
-          public class MainActivity extends BridgeActivity {
-              @Override
-              public void onCreate(Bundle savedInstanceState) {
-                  registerPlugin(FloatingOverlayPlugin.class);
-                  super.onCreate(savedInstanceState);
-              }
-          }
-          EOF
+          printf 'package com.hemantjain.magicspintracker;\n\nimport android.os.Bundle;\nimport com.getcapacitor.BridgeActivity;\n\npublic class MainActivity extends BridgeActivity {\n    @Override\n    public void onCreate(Bundle savedInstanceState) {\n        registerPlugin(FloatingOverlayPlugin.class);\n        super.onCreate(savedInstanceState);\n    }\n}\n' > "$PKG_DIR/MainActivity.java"
 
           node -e '
             const fs = require("fs");
 
-            // 1. Add ML Kit Text Recognition to android/app/build.gradle
             const gradlePath = "android/app/build.gradle";
             let gradle = fs.readFileSync(gradlePath, "utf8");
             if (!gradle.includes("com.google.mlkit:text-recognition")) {
               gradle = gradle.replace(
                 /dependencies\s*\{/,
-                "dependencies {\n    implementation \x27com.google.mlkit:text-recognition:16.0.1\x27"
+                "dependencies {\n    implementation \"com.google.mlkit:text-recognition:16.0.1\""
               );
               fs.writeFileSync(gradlePath, gradle, "utf8");
             }
 
-            // 2. Add Overlay, MediaProjection Permissions & Service to AndroidManifest.xml
             const manifestPath = "android/app/src/main/AndroidManifest.xml";
             let manifest = fs.readFileSync(manifestPath, "utf8");
 
@@ -80,6 +68,7 @@ jobs:
               "android.permission.SYSTEM_ALERT_WINDOW",
               "android.permission.FOREGROUND_SERVICE",
               "android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION",
+              "android.permission.FOREGROUND_SERVICE_SPECIAL_USE",
               "android.permission.POST_NOTIFICATIONS"
             ];
             let permXml = "";
@@ -93,7 +82,7 @@ jobs:
             }
 
             if (!manifest.includes("FloatingOverlayService")) {
-              const serviceXml = `        <service\n            android:name=".FloatingOverlayService"\n            android:enabled="true"\n            android:exported="false"\n            android:foregroundServiceType="mediaProjection" />\n`;
+              const serviceXml = `        <service\n            android:name=".FloatingOverlayService"\n            android:enabled="true"\n            android:exported="false"\n            android:foregroundServiceType="mediaProjection|specialUse">\n            <property\n                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"\n                android:value="Floating roulette spin tracker overlay" />\n        </service>\n`;
               manifest = manifest.replace("</application>", serviceXml + "    </application>");
             }
             fs.writeFileSync(manifestPath, manifest, "utf8");
