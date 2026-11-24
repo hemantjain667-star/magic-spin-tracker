@@ -1,7 +1,9 @@
+
 package com.hemantjain.magicspintracker;
 
 import android.app.Service;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.graphics.PixelFormat;
 import android.graphics.Typeface;
@@ -9,7 +11,6 @@ import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
 import android.os.IBinder;
 import android.provider.Settings;
-import android.text.TextUtils;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
@@ -27,7 +28,14 @@ public class FloatingOverlayService extends Service {
     public static final String ACTION_SHOW = "com.hemantjain.magicspintracker.ACTION_SHOW_OVERLAY";
     public static final String ACTION_HIDE = "com.hemantjain.magicspintracker.ACTION_HIDE_OVERLAY";
     public static final String ACTION_NUMBER_SUBMITTED = "com.hemantjain.magicspintracker.NUMBER_SUBMITTED";
+    public static final String ACTION_UPDATE_INFO = "com.hemantjain.magicspintracker.ACTION_UPDATE_INFO";
+
     public static final String EXTRA_NUMBER = "extra_number";
+    public static final String EXTRA_PATTERN = "extra_pattern";
+    public static final String EXTRA_MULTIPLIER = "extra_multiplier";
+    public static final String EXTRA_IS_PLAYING = "extra_is_playing";
+
+    private static final String PREFS_NAME = "floating_overlay_state";
 
     private WindowManager windowManager;
     private WindowManager.LayoutParams params;
@@ -36,7 +44,14 @@ public class FloatingOverlayService extends Service {
     private LinearLayout pillView;
     private LinearLayout expandedView;
     private TextView selectedNumberText;
+    private TextView pillInfoText;
+    private TextView expandedInfoText;
+
     private Integer selectedNumber = null;
+
+    private int currentPattern = 1;
+    private int currentMultiplier = 1;
+    private boolean currentIsPlaying = false;
 
     @Override
     public IBinder onBind(Intent intent) {
@@ -45,9 +60,26 @@ public class FloatingOverlayService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+
         if (intent != null && ACTION_HIDE.equals(intent.getAction())) {
             removeOverlay();
             stopSelf();
+            return START_NOT_STICKY;
+        }
+
+        if (intent != null && ACTION_UPDATE_INFO.equals(intent.getAction())) {
+            currentPattern = Math.max(0, Math.min(9,
+                    intent.getIntExtra(EXTRA_PATTERN, 1)));
+            currentMultiplier = Math.max(1,
+                    intent.getIntExtra(EXTRA_MULTIPLIER, 1));
+            currentIsPlaying = intent.getBooleanExtra(EXTRA_IS_PLAYING, false);
+
+            saveOverlayState();
+            updateInfoLabels();
+
+            if (rootContainer == null) {
+                stopSelf();
+            }
             return START_NOT_STICKY;
         }
 
@@ -57,10 +89,29 @@ public class FloatingOverlayService extends Service {
             return START_NOT_STICKY;
         }
 
+        loadOverlayState();
+
         if (rootContainer == null) {
             createOverlay();
         }
+
         return START_STICKY;
+    }
+
+    private void saveOverlayState() {
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                .edit()
+                .putInt("pattern", currentPattern)
+                .putInt("multiplier", currentMultiplier)
+                .putBoolean("isPlaying", currentIsPlaying)
+                .apply();
+    }
+
+    private void loadOverlayState() {
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        currentPattern = prefs.getInt("pattern", 1);
+        currentMultiplier = prefs.getInt("multiplier", 1);
+        currentIsPlaying = prefs.getBoolean("isPlaying", false);
     }
 
     @SuppressWarnings("deprecation")
@@ -80,8 +131,8 @@ public class FloatingOverlayService extends Service {
                 | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN;
 
         params = new WindowManager.LayoutParams(
-                dpToPx(150),
-                dpToPx(50),
+                dpToPx(178),
+                dpToPx(56),
                 layoutFlag,
                 flags,
                 PixelFormat.TRANSLUCENT
@@ -112,38 +163,50 @@ public class FloatingOverlayService extends Service {
 
     private LinearLayout buildPillView() {
         LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.HORIZONTAL);
+        box.setOrientation(LinearLayout.VERTICAL);
         box.setGravity(Gravity.CENTER);
-        box.setLayoutParams(new FrameLayout.LayoutParams(dpToPx(150), dpToPx(50)));
+        box.setLayoutParams(new FrameLayout.LayoutParams(
+                dpToPx(178), dpToPx(56)));
         box.setBackground(makeRoundedBg("#0F172A", "#38BDF8", 2, 12));
-        box.setPadding(dpToPx(6), dpToPx(4), dpToPx(6), dpToPx(4));
+        box.setPadding(dpToPx(5), dpToPx(3), dpToPx(5), dpToPx(3));
 
-        TextView label = new TextView(this);
-        label.setText("SPIN PIN • 0-36");
-        label.setTextColor(Color.parseColor("#F8FAFC"));
-        label.setTextSize(11.5f);
-        label.setTypeface(Typeface.DEFAULT_BOLD);
-        label.setMaxLines(1);
-        label.setEllipsize(TextUtils.TruncateAt.END);
+        TextView heading = new TextView(this);
+        heading.setText("SPIN PIN");
+        heading.setTextColor(Color.parseColor("#38BDF8"));
+        heading.setTextSize(9f);
+        heading.setTypeface(Typeface.DEFAULT_BOLD);
+        heading.setGravity(Gravity.CENTER);
 
-        box.addView(label);
+        pillInfoText = new TextView(this);
+        pillInfoText.setTextColor(Color.parseColor("#F8FAFC"));
+        pillInfoText.setTextSize(12f);
+        pillInfoText.setTypeface(Typeface.DEFAULT_BOLD);
+        pillInfoText.setGravity(Gravity.CENTER);
+        pillInfoText.setMaxLines(1);
+
+        box.addView(heading);
+        box.addView(pillInfoText);
+
         box.setOnClickListener(v -> toggleExpand(true));
+        updateInfoLabels();
         return box;
     }
 
     private LinearLayout buildExpandedKeypadView() {
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
-        panel.setLayoutParams(new FrameLayout.LayoutParams(dpToPx(220), dpToPx(250)));
+        panel.setLayoutParams(new FrameLayout.LayoutParams(
+                dpToPx(220), dpToPx(278)));
         panel.setBackground(makeRoundedBg("#0F172A", "#38BDF8", 2, 12));
         panel.setPadding(dpToPx(5), dpToPx(5), dpToPx(5), dpToPx(5));
 
         LinearLayout topBar = new LinearLayout(this);
         topBar.setOrientation(LinearLayout.HORIZONTAL);
         topBar.setGravity(Gravity.CENTER_VERTICAL);
+
         LinearLayout.LayoutParams topParams = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, dpToPx(30));
-        topParams.bottomMargin = dpToPx(3);
+        topParams.bottomMargin = dpToPx(2);
         topBar.setLayoutParams(topParams);
 
         Button collapseBtn = new Button(this);
@@ -152,7 +215,8 @@ public class FloatingOverlayService extends Service {
         collapseBtn.setTextSize(11f);
         collapseBtn.setBackground(makeRoundedBg("#334155", "#475569", 1, 6));
         collapseBtn.setPadding(0, 0, 0, 0);
-        collapseBtn.setLayoutParams(new LinearLayout.LayoutParams(dpToPx(28), dpToPx(28)));
+        collapseBtn.setLayoutParams(new LinearLayout.LayoutParams(
+                dpToPx(28), dpToPx(28)));
         collapseBtn.setOnClickListener(v -> toggleExpand(false));
 
         selectedNumberText = new TextView(this);
@@ -161,7 +225,8 @@ public class FloatingOverlayService extends Service {
         selectedNumberText.setTextSize(11.5f);
         selectedNumberText.setTypeface(Typeface.DEFAULT_BOLD);
         selectedNumberText.setGravity(Gravity.CENTER);
-        selectedNumberText.setLayoutParams(new LinearLayout.LayoutParams(0, dpToPx(28), 1f));
+        selectedNumberText.setLayoutParams(new LinearLayout.LayoutParams(
+                0, dpToPx(28), 1f));
 
         Button goBtn = new Button(this);
         goBtn.setText("GO");
@@ -170,13 +235,27 @@ public class FloatingOverlayService extends Service {
         goBtn.setTypeface(Typeface.DEFAULT_BOLD);
         goBtn.setBackground(makeRoundedBg("#22C55E", "#16A34A", 1, 6));
         goBtn.setPadding(0, 0, 0, 0);
-        goBtn.setLayoutParams(new LinearLayout.LayoutParams(dpToPx(44), dpToPx(28)));
+        goBtn.setLayoutParams(new LinearLayout.LayoutParams(
+                dpToPx(44), dpToPx(28)));
         goBtn.setOnClickListener(v -> submitSelectedNumber());
 
         topBar.addView(collapseBtn);
         topBar.addView(selectedNumberText);
         topBar.addView(goBtn);
         panel.addView(topBar);
+
+        expandedInfoText = new TextView(this);
+        expandedInfoText.setTextColor(Color.parseColor("#F8FAFC"));
+        expandedInfoText.setTextSize(12f);
+        expandedInfoText.setTypeface(Typeface.DEFAULT_BOLD);
+        expandedInfoText.setGravity(Gravity.CENTER);
+        expandedInfoText.setBackground(makeRoundedBg("#1E293B", "#334155", 1, 6));
+
+        LinearLayout.LayoutParams infoParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dpToPx(27));
+        infoParams.bottomMargin = dpToPx(3);
+        expandedInfoText.setLayoutParams(infoParams);
+        panel.addView(expandedInfoText);
 
         GridLayout grid = new GridLayout(this);
         grid.setColumnCount(7);
@@ -197,7 +276,8 @@ public class FloatingOverlayService extends Service {
             btn.setFocusable(false);
             btn.setFocusableInTouchMode(false);
 
-            String bgHex = (num == 0) ? "#15803D" : (isRed(num) ? "#B91C1C" : "#1E293B");
+            String bgHex = (num == 0) ? "#15803D"
+                    : (isRed(num) ? "#B91C1C" : "#1E293B");
             btn.setBackground(makeRoundedBg(bgHex, "#334155", 1, 4));
 
             GridLayout.LayoutParams glp = new GridLayout.LayoutParams();
@@ -222,49 +302,72 @@ public class FloatingOverlayService extends Service {
         clrBtn.setFocusable(false);
         clrBtn.setFocusableInTouchMode(false);
         clrBtn.setBackground(makeRoundedBg("#475569", "#64748B", 1, 4));
+
         GridLayout.LayoutParams clrLp = new GridLayout.LayoutParams();
         clrLp.width = cellW;
         clrLp.height = cellH;
         clrLp.setMargins(dpToPx(1), dpToPx(1), dpToPx(1), dpToPx(1));
         clrBtn.setLayoutParams(clrLp);
+
         clrBtn.setOnClickListener(v -> {
             selectedNumber = null;
             selectedNumberText.setText("NO: --");
         });
-        grid.addView(clrBtn);
 
+        grid.addView(clrBtn);
         panel.addView(grid);
+
+        updateInfoLabels();
         return panel;
+    }
+
+    private void updateInfoLabels() {
+        String info = "PATTERN: " + currentPattern
+                + "     BET: " + currentMultiplier + "X";
+
+        if (pillInfoText != null) {
+            pillInfoText.setText(info);
+        }
+
+        if (expandedInfoText != null) {
+            expandedInfoText.setText(info);
+        }
     }
 
     private void submitSelectedNumber() {
         if (selectedNumber == null) {
-            Toast.makeText(this, "0 se 36 ke beech number chunein", Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "0 se 36 ke beech number chunein",
+                    Toast.LENGTH_SHORT).show();
             return;
         }
+
         Intent broadcast = new Intent(ACTION_NUMBER_SUBMITTED);
         broadcast.setPackage(getPackageName());
         broadcast.putExtra(EXTRA_NUMBER, selectedNumber);
         sendBroadcast(broadcast);
 
-        Toast.makeText(this, "Spin Added: " + selectedNumber, Toast.LENGTH_SHORT).show();
+        Toast.makeText(this, "Spin Added: " + selectedNumber,
+                Toast.LENGTH_SHORT).show();
+
         selectedNumber = null;
         selectedNumberText.setText("NO: --");
     }
 
     private void toggleExpand(boolean expand) {
         if (rootContainer == null || params == null || windowManager == null) return;
+
         if (expand) {
             pillView.setVisibility(View.GONE);
             expandedView.setVisibility(View.VISIBLE);
             params.width = dpToPx(220);
-            params.height = dpToPx(250);
+            params.height = dpToPx(278);
         } else {
             expandedView.setVisibility(View.GONE);
             pillView.setVisibility(View.VISIBLE);
-            params.width = dpToPx(150);
-            params.height = dpToPx(50);
+            params.width = dpToPx(178);
+            params.height = dpToPx(56);
         }
+
         windowManager.updateViewLayout(rootContainer, params);
     }
 
@@ -286,18 +389,22 @@ public class FloatingOverlayService extends Service {
                         initialTouchY = event.getRawY();
                         moved = false;
                         return false;
+
                     case MotionEvent.ACTION_MOVE:
                         int dx = Math.round(event.getRawX() - initialTouchX);
                         int dy = Math.round(event.getRawY() - initialTouchY);
+
                         if (Math.abs(dx) > 6 || Math.abs(dy) > 6) {
                             moved = true;
                             params.x = Math.max(0, initialX + dx);
                             params.y = Math.max(0, initialY + dy);
+
                             if (rootContainer != null && windowManager != null) {
                                 windowManager.updateViewLayout(rootContainer, params);
                             }
                         }
                         return moved;
+
                     case MotionEvent.ACTION_UP:
                         if (moved) {
                             return true;
@@ -312,11 +419,14 @@ public class FloatingOverlayService extends Service {
 
     private boolean isRed(int n) {
         int[] reds = {1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36};
-        for (int r : reds) if (r == n) return true;
+        for (int r : reds) {
+            if (r == n) return true;
+        }
         return false;
     }
 
-    private GradientDrawable makeRoundedBg(String fillHex, String strokeHex, int strokeDp, int radiusDp) {
+    private GradientDrawable makeRoundedBg(
+            String fillHex, String strokeHex, int strokeDp, int radiusDp) {
         GradientDrawable gd = new GradientDrawable();
         gd.setColor(Color.parseColor(fillHex));
         gd.setStroke(dpToPx(strokeDp), Color.parseColor(strokeHex));
@@ -332,8 +442,14 @@ public class FloatingOverlayService extends Service {
         if (rootContainer != null && windowManager != null) {
             try {
                 windowManager.removeView(rootContainer);
-            } catch (Exception ignored) {}
+            } catch (Exception ignored) {
+            }
             rootContainer = null;
+            pillView = null;
+            expandedView = null;
+            pillInfoText = null;
+            expandedInfoText = null;
+            selectedNumberText = null;
         }
     }
 
