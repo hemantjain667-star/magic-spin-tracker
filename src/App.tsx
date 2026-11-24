@@ -1,3 +1,4 @@
+
 import { useEffect, useRef, useState } from 'react';
 import { calculateRecords } from './lib/game';
 import { playMelody, setSoundEnabled } from './lib/sound';
@@ -42,8 +43,19 @@ export default function App() {
     }
   }, [spins]);
 
+  useEffect(() => {
+    if (!isAndroidNative()) return;
+
+    const state = calculateRecords(spins);
+    FloatingOverlay.updateInfo({
+      pattern: state.nextPettan,
+      multiplier: state.nextMult,
+      isPlaying: state.isNextPlay,
+    }).catch(() => {});
+  }, [spins]);
+
   const applySpinNumber = (num: number) => {
-    if (Number.isNaN(num) || num < 0 || num > 36) {
+    if (!Number.isInteger(num) || num < 0 || num > 36) {
       alert('0 se 36 ke beech number dalein.');
       return;
     }
@@ -59,9 +71,7 @@ export default function App() {
         if (soundOnRef.current) playMelody(last.statusType);
         vibrate(last.statusType === 'HIT' ? [80, 50, 120] : 40);
       }
-    } catch {
-      // Audio/haptics safe fallback
-    }
+    } catch {}
   };
 
   useEffect(() => {
@@ -86,9 +96,7 @@ export default function App() {
       });
     }
 
-    const onCustomOverlayNumber = () => {
-      flushQueue();
-    };
+    const onCustomOverlayNumber = () => flushQueue();
     window.addEventListener('magic-spin-overlay-number', onCustomOverlayNumber);
 
     return () => {
@@ -129,9 +137,7 @@ export default function App() {
     setSpins([]);
     try {
       localStorage.removeItem(STORAGE_KEY);
-    } catch {
-      // Ignore
-    }
+    } catch {}
   };
 
   return (
