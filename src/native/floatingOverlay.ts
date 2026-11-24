@@ -1,3 +1,4 @@
+
 import { Capacitor, registerPlugin, type PluginListenerHandle } from '@capacitor/core';
 
 export interface FloatingOverlayPluginInterface {
@@ -5,6 +6,11 @@ export interface FloatingOverlayPluginInterface {
   requestPermission(): Promise<{ requested: boolean }>;
   startOverlay(): Promise<void>;
   stopOverlay(): Promise<void>;
+  updateInfo(options: {
+    pattern: number;
+    multiplier: number;
+    isPlaying: boolean;
+  }): Promise<void>;
   addListener(
     eventName: 'spinNumberSubmitted',
     listenerFunc: (data: { number: number }) => void
