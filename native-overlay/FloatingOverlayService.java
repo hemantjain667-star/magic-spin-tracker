@@ -18,7 +18,6 @@ import com.google.mlkit.vision.common.InputImage;
 import com.google.mlkit.vision.text.*;
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions;
 import org.json.*;
-import java.nio.ByteBuffer;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -49,7 +48,10 @@ public class FloatingOverlayService extends Service {
 
     private static final String CHANNEL_ID = "magic_spin_overlay_channel";
     private static final int NOTIF_ID = 4109;
-    private static final long OCR_INTERVAL_MS = 450L;
+    private static final long OCR_INTERVAL_MS = 800L;      // Steady 0.8s scan
+    private static final long DIFF_COOLDOWN_MS = 3000L;    // Min 3s between different numbers
+    private static final long REPEAT_COOLDOWN_MS = 14000L; // Min 14s before auto-repeat
+    private static final int REPEAT_BLANK_FRAMES = 6;      // Must be blank ~4.8s for auto-repeat
 
     private static final Object QUEUE_LOCK = new Object();
     private static final Object SIREN_LOCK = new Object();
@@ -142,8 +144,7 @@ public class FloatingOverlayService extends Service {
     private static void sendSirenBroadcast(Context ctx, boolean on) {
         if (ctx == null) return;
         try {
-            Intent i = new Intent(ACTION_SIREN_STATUS).setPackage(ctx.getPackageName()).putExtra(EXTRA_SIREN_PLAYING, on);
-            ctx.sendBroadcast(i);
+            ctx.sendBroadcast(new Intent(ACTION_SIREN_STATUS).setPackage(ctx.getPackageName()).putExtra(EXTRA_SIREN_PLAYING, on));
         } catch (Exception ignored) {}
     }
 
@@ -167,10 +168,9 @@ public class FloatingOverlayService extends Service {
     private final AtomicBoolean ocrBusy = new AtomicBoolean(false);
 
     private Integer candNum = null, lastOcrNum = null, selNum = null;
-    private int stableCnt = 0, blankCnt = 0, staticNbrTicks = 0;
-    private boolean readyRepeat = false, histMode = false;
+    private int stableCnt = 0, blankCnt = 0;
+    private boolean sawLongBlank = false;
     private long lastSubMs = 0L;
-    private int[] lastNbrThumb = null;
     private int curPat = 1, curMult = 1, curUnit = 0;
     private boolean curPlay = false;
     private String ocrStatus = "MANUAL";
@@ -279,7 +279,7 @@ public class FloatingOverlayService extends Service {
         DisplayMetrics dm = realMetrics();
         setupDisplay(dm.widthPixels, dm.heightPixels, dm.densityDpi);
         capturing = true; autoScan = true; ocrStatus = "BOX: --";
-        candNum = null; stableCnt = 0; blankCnt = 2; readyRepeat = true; staticNbrTicks = 0; histMode = false; lastNbrThumb = null;
+        candNum = null; stableCnt = 0; blankCnt = 0; sawLongBlank = false;
         sendCapBroadcast(); updateUI(); tickOcr();
         Toast.makeText(this, "Green Box number par rakh kar LOCK BOX dabayein!", Toast.LENGTH_LONG).show();
     }
@@ -340,9 +340,6 @@ public class FloatingOverlayService extends Service {
             int cw = Math.max(4, Math.min(iw - cx, Math.round((bw - ins * 2) * sx)));
             int ch = Math.max(4, Math.min(ih - cy, Math.round((bh - ins * 2) * sy)));
 
-            int nx = (cx + cw * 2 + 4 < iw) ? (cx + cw + 4) : Math.max(0, cx - cw - 4);
-            final int[] nbr = thumb12(full, nx, cy, Math.min(cw, iw - nx), ch);
-
             Bitmap crop = Bitmap.createBitmap(full, cx, cy, cw, ch);
             full.recycle();
             final Bitmap padBmp = scaleAndPad(crop);
@@ -353,12 +350,12 @@ public class FloatingOverlayService extends Service {
                 Integer d1 = parseNum(vt.getText());
                 if (d1 != null) {
                     padBmp.recycle(); ocrBusy.set(false);
-                    uiHandler.post(() -> onOcrResult(d1, nbr));
+                    uiHandler.post(() -> onOcrResult(d1));
                 } else {
                     Bitmap bwBmp = toHighContrast(padBmp);
                     padBmp.recycle();
                     ocr.process(InputImage.fromBitmap(bwBmp, 0))
-                            .addOnSuccessListener(vt2 -> uiHandler.post(() -> onOcrResult(parseNum(vt2.getText()), nbr)))
+                            .addOnSuccessListener(vt2 -> uiHandler.post(() -> onOcrResult(parseNum(vt2.getText()))))
                             .addOnCompleteListener(t -> { bwBmp.recycle(); ocrBusy.set(false); });
                 }
             }).addOnFailureListener(e -> { padBmp.recycle(); ocrBusy.set(false); });
@@ -397,24 +394,6 @@ public class FloatingOverlayService extends Service {
 
     private int lum(int c) { return (int) (0.299 * Color.red(c) + 0.587 * Color.green(c) + 0.114 * Color.blue(c)); }
 
-    private int[] thumb12(Bitmap b, int x, int y, int w, int h) {
-        int[] t = new int[144]; if (w <= 0 || h <= 0) return t;
-        for (int gy = 0; gy < 12; gy++) {
-            int py = Math.max(0, Math.min(b.getHeight() - 1, y + (gy * h) / 12));
-            for (int gx = 0; gx < 12; gx++) {
-                int px = Math.max(0, Math.min(b.getWidth() - 1, x + (gx * w) / 12));
-                t[gy * 12 + gx] = lum(b.getPixel(px, py));
-            }
-        }
-        return t;
-    }
-
-    private int diffThumb(int[] a, int[] b) {
-        if (a == null || b == null) return 0;
-        long s = 0; for (int i = 0; i < a.length; i++) s += Math.abs(a[i] - b[i]);
-        return (int) (s / a.length);
-    }
-
     private Integer parseNum(String raw) {
         if (raw == null) return null;
         String s = raw.replace("\n", " ").trim();
@@ -422,45 +401,47 @@ public class FloatingOverlayService extends Service {
         if (s.matches(".*[:.,$%xX₹].*")) return null;
         s = s.replace(" ", "").replace('O', '0').replace('o', '0').replace('I', '1').replace('l', '1').replace('|', '1');
         if (!s.matches("^[0-9]{1,2}$")) return null;
-        if (s.length() == 2 && s.startsWith("0")) return null; // Reject timers 00, 05, 09
+        if (s.length() == 2 && s.startsWith("0")) return null;
         int v = Integer.parseInt(s);
         return (v >= 0 && v <= 36) ? v : null;
     }
 
-    private void onOcrResult(Integer det, int[] nbr) {
+    private void onOcrResult(Integer det) {
         if (!autoScan) return;
         if (det == null) {
             candNum = null; stableCnt = 0; blankCnt++;
-            if (blankCnt >= 2) readyRepeat = true;
+            if (blankCnt >= REPEAT_BLANK_FRAMES) sawLongBlank = true;
             ocrStatus = "BOX: --"; updateUI(); return;
         }
-        long now = System.currentTimeMillis();
-        if (lastOcrNum != null && lastOcrNum.equals(det) && lastNbrThumb != null) {
-            int d = diffThumb(nbr, lastNbrThumb);
-            if (!histMode) {
-                staticNbrTicks = (d < 10) ? staticNbrTicks + 1 : 0;
-                if (staticNbrTicks >= 4) histMode = true;
-            } else if (d > 22 && (now - lastSubMs) >= 5000L) {
-                readyRepeat = true; // History bar shifted -> repeat detected!
-            }
-        }
+        blankCnt = 0;
         if (candNum != null && candNum.equals(det)) stableCnt++; else { candNum = det; stableCnt = 1; }
+
         if (stableCnt >= 2) {
-            boolean isDiff = (lastOcrNum == null) || !lastOcrNum.equals(det);
-            boolean isRep = (lastOcrNum != null) && lastOcrNum.equals(det) && readyRepeat && (now - lastSubMs) >= 4000L;
-            if (isDiff || isRep) {
-                lastOcrNum = det; lastSubMs = now; lastNbrThumb = nbr;
-                readyRepeat = false; blankCnt = 0; staticNbrTicks = 0; histMode = false;
+            long elapsed = System.currentTimeMillis() - lastSubMs;
+            boolean isFirst = (lastOcrNum == null);
+            boolean isDiff = (lastOcrNum != null) && !lastOcrNum.equals(det) && elapsed >= DIFF_COOLDOWN_MS;
+            boolean isTrueRepeat = (lastOcrNum != null) && lastOcrNum.equals(det) && sawLongBlank && elapsed >= REPEAT_COOLDOWN_MS;
+
+            if (isFirst || isDiff || isTrueRepeat) {
+                lastOcrNum = det;
+                lastSubMs = System.currentTimeMillis();
+                sawLongBlank = false;
                 ocrStatus = "ADDED: " + det;
-                submitSpin(det, "ocr"); return;
+                submitSpin(det, "ocr");
+                return;
             }
-            ocrStatus = "BOX: " + det;
-        } else ocrStatus = "READ: " + det + "?";
+            ocrStatus = "HOLD: " + det;
+        } else {
+            ocrStatus = "READ: " + det + "?";
+        }
         updateUI();
     }
 
     private void submitSpin(int num, String src) {
         if (num < 0 || num > 36) return;
+        lastOcrNum = num;
+        lastSubMs = System.currentTimeMillis();
+        sawLongBlank = false;
         appendPendingSpinSync(this, num);
         int prevM = curMult;
         recalcNative();
@@ -522,7 +503,7 @@ public class FloatingOverlayService extends Service {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) boxParams.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
 
         scanBox = new FrameLayout(this);
-        scanBox.setBackground(bg("#00000000", boxLocked ? "#38BDF8" : "#22C55E", 2, 4)); // 100% clear interior!
+        scanBox.setBackground(bg("#00000000", boxLocked ? "#38BDF8" : "#22C55E", 2, 4));
         resizeHandle = new View(this);
         resizeHandle.setBackground(bg("#22C55E", "#FFFFFF", 1, 3));
         resizeHandle.setVisibility(boxLocked ? View.GONE : View.VISIBLE);
@@ -577,7 +558,7 @@ public class FloatingOverlayService extends Service {
     private void createOverlay() {
         wm = (WindowManager) getSystemService(WINDOW_SERVICE);
         if (wm == null) return;
-        params = new WindowManager.LayoutParams(dp(194), dp(66), winType(),
+        params = new WindowManager.LayoutParams(dp(220), dp(66), winType(),
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN, PixelFormat.TRANSLUCENT);
         params.gravity = Gravity.TOP | Gravity.START; params.x = dp(14); params.y = dp(90);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) params.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
@@ -593,10 +574,22 @@ public class FloatingOverlayService extends Service {
 
     private LinearLayout buildPill() {
         LinearLayout b = new LinearLayout(this);
-        b.setOrientation(LinearLayout.VERTICAL); b.setGravity(Gravity.CENTER);
-        b.setLayoutParams(new FrameLayout.LayoutParams(dp(194), dp(66))); b.setPadding(dp(6), dp(3), dp(6), dp(3));
-        pillHead = mkTxt(9f); pillInfo = mkTxt(12.5f); pillInfo.setTextColor(Color.parseColor("#F8FAFC")); pillOcr = mkTxt(9f);
-        b.addView(pillHead); b.addView(pillInfo); b.addView(pillOcr);
+        b.setOrientation(LinearLayout.HORIZONTAL); b.setGravity(Gravity.CENTER_VERTICAL);
+        b.setLayoutParams(new FrameLayout.LayoutParams(dp(220), dp(66))); b.setPadding(dp(6), dp(3), dp(5), dp(3));
+
+        LinearLayout left = new LinearLayout(this);
+        left.setOrientation(LinearLayout.VERTICAL); left.setGravity(Gravity.CENTER);
+        left.setLayoutParams(new LinearLayout.LayoutParams(0, -1, 1f));
+        pillHead = mkTxt(9f); pillInfo = mkTxt(12f); pillInfo.setTextColor(Color.parseColor("#F8FAFC")); pillOcr = mkTxt(9f);
+        left.addView(pillHead); left.addView(pillInfo); left.addView(pillOcr);
+
+        Button repBtn = mkBtn("R", "#0284C7", "#38BDF8", dp(30), dp(46));
+        repBtn.setOnClickListener(v -> {
+            if (lastOcrNum != null) submitSpin(lastOcrNum, "manual");
+            else Toast.makeText(this, "Koi last number nahi", Toast.LENGTH_SHORT).show();
+        });
+
+        b.addView(left); b.addView(repBtn);
         b.setOnClickListener(v -> {
             if (isSirenPlaying()) { stopPoliceSiren(this); updateUI(); Toast.makeText(this, "8X Siren OFF", Toast.LENGTH_SHORT).show(); }
             else setExpanded(true);
@@ -676,16 +669,16 @@ public class FloatingOverlayService extends Service {
     private void updateUI() {
         boolean sir = isSirenPlaying();
         String mode = curMult == 8 ? "8X ALERT" : (curPlay ? "PLAY NOW" : "BASE MODE");
-        String info = curPat + "P  •  BET " + curMult + "X";
+        String info = curPat + "P • BET " + curMult + "X";
         String u = curUnit > 0 ? "+" + curUnit : String.valueOf(curUnit);
         if (pillView != null) pillView.setBackground(sir ? bg("#991B1B", "#FCA5A5", 2, 12)
                 : (curMult == 8 ? bg("#450A0A", "#EF4444", 2, 12) : bg(curPlay ? "#0B2922" : "#0F172A", curPlay ? "#22C55E" : "#38BDF8", 2, 12)));
         if (pillHead != null) {
-            pillHead.setText(sir ? "8X SIREN ON - TAP TO OFF" : (mode + " | U: " + u));
+            pillHead.setText(sir ? "8X SIREN - TAP OFF" : (mode + " | U:" + u));
             pillHead.setTextColor(Color.parseColor(sir ? "#FEF08A" : (curMult == 8 ? "#FCA5A5" : (curPlay ? "#4ADE80" : "#38BDF8"))));
         }
         if (pillInfo != null) pillInfo.setText(info);
-        if (pillOcr != null) { pillOcr.setText(sir ? "TAP HERE TO STOP SIREN" : ocrStatus); pillOcr.setTextColor(Color.parseColor(sir ? "#FFFFFF" : (autoScan ? "#FACC15" : "#94A3B8"))); }
+        if (pillOcr != null) { pillOcr.setText(sir ? "TAP TO STOP SIREN" : ocrStatus); pillOcr.setTextColor(Color.parseColor(sir ? "#FFFFFF" : (autoScan ? "#FACC15" : "#94A3B8"))); }
         if (sirenBtn != null) sirenBtn.setVisibility(sir ? View.VISIBLE : View.GONE);
         if (expInfo != null) expInfo.setText(mode + " | " + info + " | U:" + u);
         if (scanBtn != null) { scanBtn.setText(autoScan ? "AUTO: ON" : "AUTO: OFF"); scanBtn.setBackground(bg(autoScan ? "#15803D" : "#334155", autoScan ? "#22C55E" : "#475569", 1, 5)); }
@@ -696,7 +689,7 @@ public class FloatingOverlayService extends Service {
         if (root == null || params == null || wm == null) return;
         pillView.setVisibility(ex ? View.GONE : View.VISIBLE);
         expandedView.setVisibility(ex ? View.VISIBLE : View.GONE);
-        params.width = dp(ex ? 224 : 194); params.height = dp(ex ? 344 : 66);
+        params.width = dp(ex ? 224 : 220); params.height = dp(ex ? 344 : 66);
         wm.updateViewLayout(root, params);
     }
 
