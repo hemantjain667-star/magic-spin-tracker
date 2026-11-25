@@ -1,72 +1,29 @@
 package com.hemantjain.magicspintracker;
 
-import android.app.Notification;
-import android.app.NotificationChannel;
-import android.app.NotificationManager;
-import android.app.Service;
-import android.content.Context;
-import android.content.Intent;
-import android.content.SharedPreferences;
+import android.app.*;
+import android.content.*;
 import android.content.pm.ServiceInfo;
-import android.graphics.Bitmap;
-import android.graphics.Color;
-import android.graphics.PixelFormat;
-import android.graphics.Typeface;
+import android.graphics.*;
 import android.graphics.drawable.GradientDrawable;
-import android.hardware.display.DisplayManager;
-import android.hardware.display.VirtualDisplay;
-import android.media.AudioAttributes;
-import android.media.AudioFormat;
-import android.media.AudioManager;
-import android.media.AudioTrack;
-import android.media.Image;
-import android.media.ImageReader;
-import android.media.projection.MediaProjection;
-import android.media.projection.MediaProjectionManager;
-import android.os.Build;
-import android.os.Handler;
-import android.os.HandlerThread;
-import android.os.IBinder;
-import android.os.Looper;
+import android.hardware.display.*;
+import android.media.*;
+import android.media.projection.*;
+import android.os.*;
 import android.provider.Settings;
 import android.util.DisplayMetrics;
-import android.view.Gravity;
-import android.view.MotionEvent;
-import android.view.View;
-import android.view.ViewGroup;
-import android.view.WindowManager;
-import android.widget.Button;
-import android.widget.FrameLayout;
-import android.widget.GridLayout;
-import android.widget.LinearLayout;
-import android.widget.TextView;
-import android.widget.Toast;
-
+import android.view.*;
+import android.widget.*;
 import androidx.core.app.NotificationCompat;
-
 import com.google.mlkit.vision.common.InputImage;
-import com.google.mlkit.vision.text.TextRecognition;
-import com.google.mlkit.vision.text.TextRecognizer;
+import com.google.mlkit.vision.text.*;
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions;
-
-import org.json.JSONArray;
-import org.json.JSONObject;
-
+import org.json.*;
 import java.nio.ByteBuffer;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 public class FloatingOverlayService extends Service {
-
     public static volatile boolean isRunning = false;
-
     public static final String ACTION_SHOW = "com.hemantjain.magicspintracker.ACTION_SHOW_OVERLAY";
     public static final String ACTION_HIDE = "com.hemantjain.magicspintracker.ACTION_HIDE_OVERLAY";
     public static final String ACTION_UPDATE_INFO = "com.hemantjain.magicspintracker.ACTION_UPDATE_INFO";
@@ -78,16 +35,11 @@ public class FloatingOverlayService extends Service {
     public static final String ACTION_CAPTURE_STATUS = "com.hemantjain.magicspintracker.CAPTURE_STATUS";
     public static final String ACTION_SIREN_STATUS = "com.hemantjain.magicspintracker.SIREN_STATUS";
 
-    public static final String EXTRA_NUMBER = "extra_number";
-    public static final String EXTRA_SOURCE = "extra_source";
-    public static final String EXTRA_PATTERN = "extra_pattern";
-    public static final String EXTRA_MULTIPLIER = "extra_multiplier";
-    public static final String EXTRA_IS_PLAYING = "extra_is_playing";
-    public static final String EXTRA_TOTAL_UNIT = "extra_total_unit";
-    public static final String EXTRA_RESULT_CODE = "extra_result_code";
-    public static final String EXTRA_RESULT_DATA = "extra_result_data";
-    public static final String EXTRA_CAPTURING = "extra_capturing";
-    public static final String EXTRA_SCANNING = "extra_scanning";
+    public static final String EXTRA_NUMBER = "extra_number", EXTRA_SOURCE = "extra_source";
+    public static final String EXTRA_PATTERN = "extra_pattern", EXTRA_MULTIPLIER = "extra_multiplier";
+    public static final String EXTRA_IS_PLAYING = "extra_is_playing", EXTRA_TOTAL_UNIT = "extra_total_unit";
+    public static final String EXTRA_RESULT_CODE = "extra_result_code", EXTRA_RESULT_DATA = "extra_result_data";
+    public static final String EXTRA_CAPTURING = "extra_capturing", EXTRA_SCANNING = "extra_scanning";
     public static final String EXTRA_SIREN_PLAYING = "extra_siren_playing";
 
     public static final String PREFS_NAME = "floating_overlay_state";
@@ -97,926 +49,684 @@ public class FloatingOverlayService extends Service {
 
     private static final String CHANNEL_ID = "magic_spin_overlay_channel";
     private static final int NOTIF_ID = 4109;
-    private static final long OCR_INTERVAL_MS = 750L;
+    private static final long OCR_INTERVAL_MS = 450L;
 
-    // Continuous 8X Police Siren (foreground + background)
+    private static final Object QUEUE_LOCK = new Object();
     private static final Object SIREN_LOCK = new Object();
     private static volatile boolean sirenRunning = false;
     private static Thread sirenThread = null;
     private static AudioTrack sirenTrack = null;
 
+    public static void appendPendingSpinSync(Context ctx, int num) {
+        if (ctx == null || num < 0 || num > 36) return;
+        synchronized (QUEUE_LOCK) {
+            SharedPreferences p = ctx.getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+            try {
+                JSONArray a = new JSONArray(p.getString(KEY_PENDING_SPINS, "[]"));
+                a.put(num);
+                p.edit().putString(KEY_PENDING_SPINS, a.toString()).commit();
+            } catch (Exception ignored) {}
+        }
+    }
+
+    public static List<Integer> drainPendingSpinsSync(Context ctx) {
+        List<Integer> out = new ArrayList<>();
+        if (ctx == null) return out;
+        synchronized (QUEUE_LOCK) {
+            SharedPreferences p = ctx.getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+            String raw = p.getString(KEY_PENDING_SPINS, "[]");
+            p.edit().putString(KEY_PENDING_SPINS, "[]").commit();
+            try {
+                JSONArray a = new JSONArray(raw);
+                for (int i = 0; i < a.length(); i++) {
+                    int n = a.optInt(i, -1);
+                    if (n >= 0 && n <= 36) out.add(n);
+                }
+            } catch (Exception ignored) {}
+        }
+        return out;
+    }
+
     public static boolean isSirenPlaying() { return sirenRunning; }
 
-    public static void startPoliceSiren(Context context) {
+    public static void startPoliceSiren(Context ctx) {
         synchronized (SIREN_LOCK) {
             if (sirenRunning) return;
             sirenRunning = true;
             sirenThread = new Thread(() -> {
-                final int sampleRate = 22050;
-                final int chunkSamples = 1024;
-                final short[] buffer = new short[chunkSamples];
-                int minBuf = AudioTrack.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT);
-                int bufSize = Math.max(minBuf, chunkSamples * 4);
-                AudioTrack track = null;
+                final int sr = 22050, n = 1024;
+                short[] buf = new short[n];
+                int minB = AudioTrack.getMinBufferSize(sr, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT);
+                AudioTrack tr = null;
                 try {
-                    AudioAttributes attrs = new AudioAttributes.Builder()
+                    AudioAttributes at = new AudioAttributes.Builder()
                             .setUsage(AudioAttributes.USAGE_MEDIA)
-                            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                            .build();
-                    AudioFormat format = new AudioFormat.Builder()
-                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                            .setSampleRate(sampleRate)
-                            .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-                            .build();
-                    track = new AudioTrack(attrs, format, bufSize, AudioTrack.MODE_STREAM, AudioManager.AUDIO_SESSION_ID_GENERATE);
-                    synchronized (SIREN_LOCK) { sirenTrack = track; }
-                    track.play();
-                    double phase = 0.0, lfoPhase = 0.0;
-                    final double lfoStep = 2.0 * Math.PI * 0.85 / sampleRate;
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build();
+                    AudioFormat fm = new AudioFormat.Builder()
+                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT).setSampleRate(sr)
+                            .setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build();
+                    tr = new AudioTrack(at, fm, Math.max(minB, n * 4), AudioTrack.MODE_STREAM, AudioManager.AUDIO_SESSION_ID_GENERATE);
+                    synchronized (SIREN_LOCK) { sirenTrack = tr; }
+                    tr.play();
+                    double ph = 0, lfo = 0, lfoStep = 2 * Math.PI * 0.85 / sr;
                     while (sirenRunning) {
-                        for (int i = 0; i < chunkSamples; i++) {
-                            double freq = 1015.0 + 365.0 * Math.sin(lfoPhase);
-                            lfoPhase += lfoStep;
-                            if (lfoPhase >= 2.0 * Math.PI) lfoPhase -= 2.0 * Math.PI;
-                            phase += 2.0 * Math.PI * freq / sampleRate;
-                            if (phase >= 2.0 * Math.PI) phase -= 2.0 * Math.PI;
-                            double wave = 0.75 * Math.sin(phase) + 0.25 * Math.sin(3.0 * phase);
-                            buffer[i] = (short) (wave * 24000.0);
+                        for (int i = 0; i < n; i++) {
+                            double freq = 1015.0 + 365.0 * Math.sin(lfo);
+                            lfo = (lfo + lfoStep) % (2 * Math.PI);
+                            ph = (ph + 2 * Math.PI * freq / sr) % (2 * Math.PI);
+                            buf[i] = (short) ((0.75 * Math.sin(ph) + 0.25 * Math.sin(3 * ph)) * 24000.0);
                         }
                         if (!sirenRunning) break;
-                        track.write(buffer, 0, chunkSamples);
+                        tr.write(buf, 0, n);
                     }
                 } catch (Exception ignored) {
                 } finally {
-                    if (track != null) {
-                        try { track.stop(); } catch (Exception ignored) {}
-                        try { track.release(); } catch (Exception ignored) {}
-                    }
-                    synchronized (SIREN_LOCK) {
-                        if (sirenTrack == track) sirenTrack = null;
-                        sirenRunning = false;
-                    }
+                    if (tr != null) { try { tr.stop(); tr.release(); } catch (Exception ignored) {} }
+                    synchronized (SIREN_LOCK) { if (sirenTrack == tr) sirenTrack = null; sirenRunning = false; }
                 }
-            }, "Magic8xPoliceSirenThread");
+            }, "Magic8xSiren");
             sirenThread.start();
         }
-        broadcastSirenStatusStatic(context, true);
+        sendSirenBroadcast(ctx, true);
     }
 
-    public static void stopPoliceSiren(Context context) {
+    public static void stopPoliceSiren(Context ctx) {
         synchronized (SIREN_LOCK) {
             sirenRunning = false;
-            if (sirenTrack != null) {
-                try { sirenTrack.pause(); } catch (Exception ignored) {}
-                try { sirenTrack.flush(); } catch (Exception ignored) {}
-                try { sirenTrack.stop(); } catch (Exception ignored) {}
-            }
-            if (sirenThread != null) {
-                sirenThread.interrupt();
-                sirenThread = null;
-            }
+            if (sirenTrack != null) { try { sirenTrack.pause(); sirenTrack.flush(); sirenTrack.stop(); } catch (Exception ignored) {} }
+            if (sirenThread != null) { sirenThread.interrupt(); sirenThread = null; }
         }
-        broadcastSirenStatusStatic(context, false);
+        sendSirenBroadcast(ctx, false);
     }
 
-    private static void broadcastSirenStatusStatic(Context context, boolean playing) {
-        if (context == null) return;
+    private static void sendSirenBroadcast(Context ctx, boolean on) {
+        if (ctx == null) return;
         try {
-            Intent intent = new Intent(ACTION_SIREN_STATUS);
-            intent.setPackage(context.getPackageName());
-            intent.putExtra(EXTRA_SIREN_PLAYING, playing);
-            context.sendBroadcast(intent);
+            Intent i = new Intent(ACTION_SIREN_STATUS).setPackage(ctx.getPackageName()).putExtra(EXTRA_SIREN_PLAYING, on);
+            ctx.sendBroadcast(i);
         } catch (Exception ignored) {}
     }
 
-    private WindowManager windowManager;
-    private WindowManager.LayoutParams params, scanBoxParams;
-    private FrameLayout rootContainer, scanBoxView;
+    private WindowManager wm;
+    private WindowManager.LayoutParams params, boxParams;
+    private FrameLayout root, scanBox;
+    private View resizeHandle;
     private LinearLayout pillView, expandedView;
-    private TextView pillHeadingText, pillInfoText, pillOcrText, expandedInfoText, selectedNumberText;
-    private Button scanToggleBtn, lockBoxBtn, stopSirenBtn;
+    private TextView pillHead, pillInfo, pillOcr, expInfo, selText;
+    private Button scanBtn, lockBtn, sirenBtn;
 
-    private boolean isBoxVisible = false, isBoxLocked = false, isCapturing = false, isAutoScanning = false;
-    private MediaProjection mediaProjection;
-    private VirtualDisplay virtualDisplay;
-    private ImageReader imageReader;
-    private TextRecognizer textRecognizer;
-    private HandlerThread captureThread;
-    private Handler captureHandler;
-    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private boolean boxVisible = false, boxLocked = false, capturing = false, autoScan = false;
+    private MediaProjection proj;
+    private VirtualDisplay vDisp;
+    private ImageReader reader;
+    private int capW = 0, capH = 0;
+    private TextRecognizer ocr;
+    private HandlerThread capThread;
+    private Handler capHandler;
+    private final Handler uiHandler = new Handler(Looper.getMainLooper());
     private final AtomicBoolean ocrBusy = new AtomicBoolean(false);
 
-    private Integer candidateNumber = null, lastSubmittedOcrNumber = null, selectedNumber = null;
-    private int stableFrameCount = 0, blankFramesSinceSubmit = 0;
-    private int currentPattern = 1, currentMultiplier = 1, currentTotalUnit = 0;
-    private boolean currentIsPlaying = false;
-    private String lastOcrStatus = "MANUAL";
+    private Integer candNum = null, lastOcrNum = null, selNum = null;
+    private int stableCnt = 0, blankCnt = 0, staticNbrTicks = 0;
+    private boolean readyRepeat = false, histMode = false;
+    private long lastSubMs = 0L;
+    private int[] lastNbrThumb = null;
+    private int curPat = 1, curMult = 1, curUnit = 0;
+    private boolean curPlay = false;
+    private String ocrStatus = "MANUAL";
 
-    private static final int[][] DEFAULT_PATTERNS = {
-            {10, 20, 30, 0, 1, 11, 21, 31, 2, 12, 22, 32, 5, 15, 25, 35, 6, 16, 26, 36, 7, 17, 27},
-            {1, 11, 21, 31, 2, 12, 22, 32, 3, 13, 23, 33, 6, 16, 26, 36, 7, 17, 27, 8, 18, 28},
-            {2, 12, 22, 32, 3, 13, 23, 33, 4, 14, 24, 34, 7, 17, 27, 8, 18, 28, 9, 19, 29},
-            {3, 13, 23, 33, 4, 14, 24, 34, 5, 15, 25, 35, 8, 18, 28, 9, 19, 29, 10, 20, 30, 0},
-            {4, 14, 24, 34, 5, 15, 25, 35, 6, 16, 26, 36, 9, 19, 29, 10, 20, 30, 0, 1, 11, 21, 31},
-            {5, 15, 25, 35, 6, 16, 26, 36, 7, 17, 27, 10, 20, 30, 0, 1, 11, 21, 31, 2, 12, 22, 32},
-            {6, 16, 26, 36, 7, 17, 27, 8, 18, 28, 1, 11, 21, 31, 2, 12, 22, 32, 3, 13, 23, 33},
-            {7, 17, 27, 8, 18, 28, 9, 19, 29, 2, 12, 22, 32, 3, 13, 23, 33, 4, 14, 24, 34},
-            {8, 18, 28, 9, 19, 29, 10, 20, 30, 0, 3, 13, 23, 33, 4, 14, 24, 34, 5, 15, 25, 35},
-            {9, 19, 29, 10, 20, 30, 0, 1, 11, 21, 31, 4, 14, 24, 34, 5, 15, 25, 35, 6, 16, 26, 36}
+    private static final int[][] DEF_PAT = {
+            {10,20,30,0,1,11,21,31,2,12,22,32,5,15,25,35,6,16,26,36,7,17,27},
+            {1,11,21,31,2,12,22,32,3,13,23,33,6,16,26,36,7,17,27,8,18,28},
+            {2,12,22,32,3,13,23,33,4,14,24,34,7,17,27,8,18,28,9,19,29},
+            {3,13,23,33,4,14,24,34,5,15,25,35,8,18,28,9,19,29,10,20,30,0},
+            {4,14,24,34,5,15,25,35,6,16,26,36,9,19,29,10,20,30,0,1,11,21,31},
+            {5,15,25,35,6,16,26,36,7,17,27,10,20,30,0,1,11,21,31,2,12,22,32},
+            {6,16,26,36,7,17,27,8,18,28,1,11,21,31,2,12,22,32,3,13,23,33},
+            {7,17,27,8,18,28,9,19,29,2,12,22,32,3,13,23,33,4,14,24,34},
+            {8,18,28,9,19,29,10,20,30,0,3,13,23,33,4,14,24,34,5,15,25,35},
+            {9,19,29,10,20,30,0,1,11,21,31,4,14,24,34,5,15,25,35,6,16,26,36}
     };
 
-    @Override
-    public void onCreate() {
+    @Override public void onCreate() {
         super.onCreate();
         isRunning = true;
-        createNotificationChannel();
-        textRecognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            NotificationManager nm = getSystemService(NotificationManager.class);
+            if (nm != null) nm.createNotificationChannel(new NotificationChannel(CHANNEL_ID, "Magic Spin Overlay", NotificationManager.IMPORTANCE_LOW));
+        }
+        ocr = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
     }
 
-    @Override
-    public IBinder onBind(Intent intent) { return null; }
+    @Override public IBinder onBind(Intent i) { return null; }
 
-    @Override
-    public int onStartCommand(Intent intent, int flags, int startId) {
-        String action = intent != null ? intent.getAction() : ACTION_SHOW;
-
-        if (ACTION_HIDE.equals(action)) {
-            stopPoliceSiren(this);
-            stopScreenCaptureInternal();
-            removeScanBox();
-            removeOverlay();
-            stopForeground(true);
-            stopSelf();
-            return START_NOT_STICKY;
+    @Override public int onStartCommand(Intent intent, int flags, int startId) {
+        String act = intent != null ? intent.getAction() : ACTION_SHOW;
+        if (ACTION_HIDE.equals(act)) {
+            stopPoliceSiren(this); stopCapture(); removeScanBox(); removeOverlay();
+            stopForeground(true); stopSelf(); return START_NOT_STICKY;
         }
-        if (ACTION_REFRESH_UI.equals(action)) {
-            updateInfoLabels();
-            return START_STICKY;
-        }
-        if (ACTION_STOP_CAPTURE.equals(action)) {
-            stopScreenCaptureInternal();
-            removeScanBox();
-            updateInfoLabels();
-            return START_STICKY;
-        }
-        if (ACTION_TOGGLE_TARGET_BOX.equals(action)) {
-            if (isBoxVisible) removeScanBox(); else createScanBox();
-            return START_STICKY;
-        }
-        if (ACTION_UPDATE_INFO.equals(action) && intent != null) {
-            currentPattern = Math.max(0, Math.min(9, intent.getIntExtra(EXTRA_PATTERN, currentPattern)));
-            currentMultiplier = Math.max(1, intent.getIntExtra(EXTRA_MULTIPLIER, currentMultiplier));
-            currentIsPlaying = intent.getBooleanExtra(EXTRA_IS_PLAYING, currentIsPlaying);
-            currentTotalUnit = intent.getIntExtra(EXTRA_TOTAL_UNIT, currentTotalUnit);
-            updateInfoLabels();
-            return START_STICKY;
+        if (ACTION_REFRESH_UI.equals(act)) { updateUI(); return START_STICKY; }
+        if (ACTION_STOP_CAPTURE.equals(act)) { stopCapture(); removeScanBox(); updateUI(); return START_STICKY; }
+        if (ACTION_TOGGLE_TARGET_BOX.equals(act)) { if (boxVisible) removeScanBox(); else createScanBox(); return START_STICKY; }
+        if (ACTION_UPDATE_INFO.equals(act) && intent != null) {
+            curPat = Math.max(0, Math.min(9, intent.getIntExtra(EXTRA_PATTERN, curPat)));
+            curMult = Math.max(1, intent.getIntExtra(EXTRA_MULTIPLIER, curMult));
+            curPlay = intent.getBooleanExtra(EXTRA_IS_PLAYING, curPlay);
+            curUnit = intent.getIntExtra(EXTRA_TOTAL_UNIT, curUnit);
+            updateUI(); return START_STICKY;
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
-            Toast.makeText(this, "Display over other apps permission chahiye", Toast.LENGTH_SHORT).show();
-            stopSelf();
-            return START_NOT_STICKY;
+            Toast.makeText(this, "Overlay permission chahiye", Toast.LENGTH_SHORT).show();
+            stopSelf(); return START_NOT_STICKY;
         }
+        SharedPreferences p = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        curPat = p.getInt("pattern", 1); curMult = p.getInt("multiplier", 1);
+        curPlay = p.getBoolean("isPlaying", false); curUnit = p.getInt("totalUnit", 0);
 
-        loadOverlayState();
-
-        if (ACTION_START_CAPTURE.equals(action) && intent != null) {
-            startAsForeground(true);
-            if (rootContainer == null) createOverlay();
-            if (!isBoxVisible) createScanBox();
-            int resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, -1);
-            Intent resultData = intent.getParcelableExtra(EXTRA_RESULT_DATA);
-            if (resultData != null) startScreenCaptureInternal(resultCode, resultData);
+        if (ACTION_START_CAPTURE.equals(act) && intent != null) {
+            startFg(true);
+            if (root == null) createOverlay();
+            if (!boxVisible) createScanBox();
+            Intent rd = intent.getParcelableExtra(EXTRA_RESULT_DATA);
+            if (rd != null) startCapture(intent.getIntExtra(EXTRA_RESULT_CODE, -1), rd);
             return START_STICKY;
         }
-
-        startAsForeground(false);
-        if (rootContainer == null) createOverlay();
+        startFg(false);
+        if (root == null) createOverlay();
         return START_STICKY;
     }
 
-    private void createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            NotificationChannel ch = new NotificationChannel(CHANNEL_ID, "Magic Spin Overlay & Auto Capture", NotificationManager.IMPORTANCE_LOW);
-            NotificationManager nm = getSystemService(NotificationManager.class);
-            if (nm != null) nm.createNotificationChannel(ch);
-        }
-    }
-
-    private void startAsForeground(boolean withMediaProjection) {
-        Notification notification = new NotificationCompat.Builder(this, CHANNEL_ID)
-                .setContentTitle("Magic Spin Tracker Active")
-                .setContentText(withMediaProjection ? "Auto Screen Capture + Roulette OCR chalu hai" : "Floating Overlay active hai")
-                .setSmallIcon(android.R.drawable.ic_menu_view)
-                .setOngoing(true)
-                .build();
-
+    private void startFg(boolean mp) {
+        Notification n = new NotificationCompat.Builder(this, CHANNEL_ID)
+                .setContentTitle("Magic Spin Tracker")
+                .setContentText(mp ? "Auto Screen Capture + OCR Active" : "Floating Overlay Active")
+                .setSmallIcon(android.R.drawable.ic_menu_view).setOngoing(true).build();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            int type = withMediaProjection ? ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION : ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE;
-            startForeground(NOTIF_ID, notification, type);
-        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && withMediaProjection) {
-            startForeground(NOTIF_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION);
-        } else {
-            startForeground(NOTIF_ID, notification);
-        }
+            startForeground(NOTIF_ID, n, mp ? ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION : ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && mp) {
+            startForeground(NOTIF_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION);
+        } else startForeground(NOTIF_ID, n);
     }
 
-    private void loadOverlayState() {
-        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
-        currentPattern = prefs.getInt("pattern", 1);
-        currentMultiplier = prefs.getInt("multiplier", 1);
-        currentIsPlaying = prefs.getBoolean("isPlaying", false);
-        currentTotalUnit = prefs.getInt("totalUnit", 0);
+    private DisplayMetrics realMetrics() {
+        DisplayMetrics dm = new DisplayMetrics();
+        if (wm == null) wm = (WindowManager) getSystemService(WINDOW_SERVICE);
+        wm.getDefaultDisplay().getRealMetrics(dm);
+        return dm;
     }
 
-    private void startScreenCaptureInternal(int resultCode, Intent data) {
-        stopScreenCaptureInternal();
+    private void setupDisplay(int w, int h, int d) {
+        if (vDisp != null) { try { vDisp.release(); } catch (Exception ignored) {} vDisp = null; }
+        if (reader != null) { try { reader.close(); } catch (Exception ignored) {} reader = null; }
+        if (proj == null || w <= 0 || h <= 0) return;
+        capW = w; capH = h;
+        reader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2);
+        vDisp = proj.createVirtualDisplay("MagicCap", w, h, d, DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, reader.getSurface(), null, capHandler);
+    }
+
+    private void startCapture(int rc, Intent data) {
+        stopCapture();
         MediaProjectionManager mpm = (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
         if (mpm == null) return;
-        mediaProjection = mpm.getMediaProjection(resultCode, data);
-        if (mediaProjection == null) {
-            Toast.makeText(this, "Screen Capture start nahi ho paya", Toast.LENGTH_SHORT).show();
-            return;
-        }
-        captureThread = new HandlerThread("MagicOcrCaptureThread");
-        captureThread.start();
-        captureHandler = new Handler(captureThread.getLooper());
-
-        mediaProjection.registerCallback(new MediaProjection.Callback() {
-            @Override
-            public void onStop() {
-                mainHandler.post(() -> {
-                    stopScreenCaptureInternal();
-                    updateInfoLabels();
-                });
-            }
-        }, captureHandler);
-
-        DisplayMetrics metrics = new DisplayMetrics();
-        if (windowManager == null) windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
-        windowManager.getDefaultDisplay().getRealMetrics(metrics);
-
-        imageReader = ImageReader.newInstance(metrics.widthPixels, metrics.heightPixels, PixelFormat.RGBA_8888, 2);
-        virtualDisplay = mediaProjection.createVirtualDisplay(
-                "MagicRouletteCapture", metrics.widthPixels, metrics.heightPixels, metrics.densityDpi,
-                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, imageReader.getSurface(), null, captureHandler);
-
-        isCapturing = true;
-        isAutoScanning = true;
-        lastOcrStatus = "AUTO: ON";
-        candidateNumber = null;
-        stableFrameCount = 0;
-        blankFramesSinceSubmit = 2;
-
-        broadcastCaptureStatus();
-        updateInfoLabels();
-        scheduleNextOcrTick();
-        Toast.makeText(this, "Green Box ko Roulette Number par rakhein!", Toast.LENGTH_LONG).show();
+        proj = mpm.getMediaProjection(rc, data);
+        if (proj == null) return;
+        capThread = new HandlerThread("MagicOcr"); capThread.start();
+        capHandler = new Handler(capThread.getLooper());
+        proj.registerCallback(new MediaProjection.Callback() {
+            @Override public void onStop() { uiHandler.post(() -> { stopCapture(); updateUI(); }); }
+        }, capHandler);
+        DisplayMetrics dm = realMetrics();
+        setupDisplay(dm.widthPixels, dm.heightPixels, dm.densityDpi);
+        capturing = true; autoScan = true; ocrStatus = "BOX: --";
+        candNum = null; stableCnt = 0; blankCnt = 2; readyRepeat = true; staticNbrTicks = 0; histMode = false; lastNbrThumb = null;
+        sendCapBroadcast(); updateUI(); tickOcr();
+        Toast.makeText(this, "Green Box number par rakh kar LOCK BOX dabayein!", Toast.LENGTH_LONG).show();
     }
 
-    private void stopScreenCaptureInternal() {
-        isCapturing = false;
-        isAutoScanning = false;
-        lastOcrStatus = "MANUAL";
-        if (captureHandler != null) captureHandler.removeCallbacksAndMessages(null);
-        if (virtualDisplay != null) { try { virtualDisplay.release(); } catch (Exception ignored) {} virtualDisplay = null; }
-        if (imageReader != null) { try { imageReader.close(); } catch (Exception ignored) {} imageReader = null; }
-        if (mediaProjection != null) { try { mediaProjection.stop(); } catch (Exception ignored) {} mediaProjection = null; }
-        if (captureThread != null) { try { captureThread.quitSafely(); } catch (Exception ignored) {} captureThread = null; captureHandler = null; }
-        broadcastCaptureStatus();
+    private void stopCapture() {
+        capturing = false; autoScan = false; ocrStatus = "MANUAL";
+        if (capHandler != null) capHandler.removeCallbacksAndMessages(null);
+        if (vDisp != null) { try { vDisp.release(); } catch (Exception ignored) {} vDisp = null; }
+        if (reader != null) { try { reader.close(); } catch (Exception ignored) {} reader = null; }
+        if (proj != null) { try { proj.stop(); } catch (Exception ignored) {} proj = null; }
+        if (capThread != null) { try { capThread.quitSafely(); } catch (Exception ignored) {} capThread = null; capHandler = null; }
+        capW = 0; capH = 0;
+        sendCapBroadcast();
     }
 
-    private void broadcastCaptureStatus() {
-        Intent s = new Intent(ACTION_CAPTURE_STATUS);
-        s.setPackage(getPackageName());
-        s.putExtra(EXTRA_CAPTURING, isCapturing);
-        s.putExtra(EXTRA_SCANNING, isAutoScanning);
-        sendBroadcast(s);
+    private void sendCapBroadcast() {
+        sendBroadcast(new Intent(ACTION_CAPTURE_STATUS).setPackage(getPackageName())
+                .putExtra(EXTRA_CAPTURING, capturing).putExtra(EXTRA_SCANNING, autoScan));
     }
 
-    private void scheduleNextOcrTick() {
-        if (!isCapturing || captureHandler == null) return;
-        captureHandler.postDelayed(() -> {
-            if (!isCapturing) return;
-            if (isAutoScanning && isBoxVisible && !ocrBusy.get()) captureAndRunOcr();
-            scheduleNextOcrTick();
+    private void tickOcr() {
+        if (!capturing || capHandler == null) return;
+        capHandler.postDelayed(() -> {
+            if (!capturing) return;
+            if (autoScan && boxVisible && !ocrBusy.get()) runOcrFrame();
+            tickOcr();
         }, OCR_INTERVAL_MS);
     }
 
-    private void captureAndRunOcr() {
-        if (imageReader == null || scanBoxView == null || !isBoxVisible) return;
-        Image image = null;
+    private void runOcrFrame() {
+        if (proj == null || scanBox == null || !boxVisible) return;
+        DisplayMetrics dm = realMetrics();
+        if (dm.widthPixels != capW || dm.heightPixels != capH) {
+            setupDisplay(dm.widthPixels, dm.heightPixels, dm.densityDpi);
+            return;
+        }
+        if (reader == null) return;
+        Image img = null;
         try {
-            image = imageReader.acquireLatestImage();
-            if (image == null) return;
-            int imgW = image.getWidth(), imgH = image.getHeight();
-            Image.Plane[] planes = image.getPlanes();
-            ByteBuffer buffer = planes[0].getBuffer();
-            int pixelStride = planes[0].getPixelStride();
-            int rowPadding = planes[0].getRowStride() - pixelStride * imgW;
-
-            Bitmap fullBitmap = Bitmap.createBitmap(imgW + rowPadding / pixelStride, imgH, Bitmap.Config.ARGB_8888);
-            fullBitmap.copyPixelsFromBuffer(buffer);
-            image.close();
-            image = null;
+            img = reader.acquireLatestImage();
+            if (img == null) return;
+            int iw = img.getWidth(), ih = img.getHeight();
+            Image.Plane pl = img.getPlanes()[0];
+            int ps = pl.getPixelStride(), pad = pl.getRowStride() - ps * iw;
+            Bitmap full = Bitmap.createBitmap(iw + pad / ps, ih, Bitmap.Config.ARGB_8888);
+            full.copyPixelsFromBuffer(pl.getBuffer());
+            img.close(); img = null;
 
             int[] loc = new int[2];
-            scanBoxView.getLocationOnScreen(loc);
-            int inset = dpToPx(5);
-            int cropX = Math.max(0, Math.min(imgW - 2, loc[0] + inset));
-            int cropY = Math.max(0, Math.min(imgH - 2, loc[1] + inset));
-            int cropW = Math.max(4, Math.min(imgW - cropX, scanBoxView.getWidth() - inset * 2));
-            int cropH = Math.max(4, Math.min(imgH - cropY, scanBoxView.getHeight() - inset * 2));
+            scanBox.getLocationOnScreen(loc);
+            int bw = scanBox.getWidth(), bh = scanBox.getHeight();
+            if (bw <= 0 || bh <= 0) { full.recycle(); return; }
 
-            Bitmap cropped = Bitmap.createBitmap(fullBitmap, cropX, cropY, cropW, cropH);
-            fullBitmap.recycle();
-            Bitmap scaled = Bitmap.createScaledBitmap(cropped, cropW * 2, cropH * 2, true);
-            cropped.recycle();
+            float sx = (float) iw / Math.max(1, dm.widthPixels), sy = (float) ih / Math.max(1, dm.heightPixels);
+            int ins = dp(4);
+            int cx = Math.max(0, Math.min(iw - 4, Math.round((loc[0] + ins) * sx)));
+            int cy = Math.max(0, Math.min(ih - 4, Math.round((loc[1] + ins) * sy)));
+            int cw = Math.max(4, Math.min(iw - cx, Math.round((bw - ins * 2) * sx)));
+            int ch = Math.max(4, Math.min(ih - cy, Math.round((bh - ins * 2) * sy)));
+
+            int nx = (cx + cw * 2 + 4 < iw) ? (cx + cw + 4) : Math.max(0, cx - cw - 4);
+            final int[] nbr = thumb12(full, nx, cy, Math.min(cw, iw - nx), ch);
+
+            Bitmap crop = Bitmap.createBitmap(full, cx, cy, cw, ch);
+            full.recycle();
+            final Bitmap padBmp = scaleAndPad(crop);
+            crop.recycle();
 
             ocrBusy.set(true);
-            textRecognizer.process(InputImage.fromBitmap(scaled, 0))
-                    .addOnSuccessListener(vt -> {
-                        Integer det = extractRouletteNumber(vt.getText());
-                        mainHandler.post(() -> handleOcrDetection(det));
-                    })
-                    .addOnCompleteListener(t -> {
-                        scaled.recycle();
-                        ocrBusy.set(false);
-                    });
+            ocr.process(InputImage.fromBitmap(padBmp, 0)).addOnSuccessListener(vt -> {
+                Integer d1 = parseNum(vt.getText());
+                if (d1 != null) {
+                    padBmp.recycle(); ocrBusy.set(false);
+                    uiHandler.post(() -> onOcrResult(d1, nbr));
+                } else {
+                    Bitmap bwBmp = toHighContrast(padBmp);
+                    padBmp.recycle();
+                    ocr.process(InputImage.fromBitmap(bwBmp, 0))
+                            .addOnSuccessListener(vt2 -> uiHandler.post(() -> onOcrResult(parseNum(vt2.getText()), nbr)))
+                            .addOnCompleteListener(t -> { bwBmp.recycle(); ocrBusy.set(false); });
+                }
+            }).addOnFailureListener(e -> { padBmp.recycle(); ocrBusy.set(false); });
         } catch (Exception e) {
-            if (image != null) { try { image.close(); } catch (Exception ignored) {} }
+            if (img != null) { try { img.close(); } catch (Exception ignored) {} }
             ocrBusy.set(false);
         }
     }
 
-    private Integer extractRouletteNumber(String rawText) {
-        if (rawText == null) return null;
-        String cleaned = rawText.trim().replace('O', '0').replace('o', '0').replace('I', '1')
-                .replace('l', '1').replace('|', '1').replace('S', '5').replace('B', '8');
-        Matcher m = Pattern.compile("\\b([0-9]{1,2})\\b").matcher(cleaned);
-        while (m.find()) {
-            try {
-                int v = Integer.parseInt(m.group(1));
-                if (v >= 0 && v <= 36) return v;
-            } catch (NumberFormatException ignored) {}
-        }
-        return null;
+    private Bitmap scaleAndPad(Bitmap s) {
+        int sw = Math.max(1, s.getWidth()), sh = Math.max(1, s.getHeight());
+        float sc = Math.max(2f, Math.min(4f, 180f / sh));
+        int tw = Math.min(420, Math.round(sw * sc)), th = Math.min(420, Math.round(sh * sc));
+        Bitmap up = Bitmap.createScaledBitmap(s, tw, th, true);
+        int p = 26, bg = s.getPixel(Math.min(1, sw - 1), Math.min(1, sh - 1));
+        Bitmap out = Bitmap.createBitmap(tw + p * 2, th + p * 2, Bitmap.Config.ARGB_8888);
+        Canvas c = new Canvas(out); c.drawColor(bg); c.drawBitmap(up, p, p, null); up.recycle();
+        return out;
     }
 
-    private void handleOcrDetection(Integer detected) {
-        if (!isAutoScanning) return;
-        if (detected == null) {
-            candidateNumber = null;
-            stableFrameCount = 0;
-            blankFramesSinceSubmit++;
-            lastOcrStatus = "SCANNING...";
-            updateInfoLabels();
-            return;
+    private Bitmap toHighContrast(Bitmap src) {
+        int w = src.getWidth(), h = src.getHeight();
+        int[] px = new int[w * h]; src.getPixels(px, 0, w, 0, 0, w, h);
+        long bs = 0; for (int x = 0; x < w; x++) bs += lum(px[x]) + lum(px[(h - 1) * w + x]);
+        int bg = (int) (bs / Math.max(1, w * 2)), br = 0, dk = 0;
+        for (int i = 0; i < px.length; i += 4) { int l = lum(px[i]); if (l > bg + 35) br++; else if (l < bg - 35) dk++; }
+        boolean lightText = br >= dk;
+        for (int i = 0; i < px.length; i++) {
+            int l = lum(px[i]);
+            px[i] = (lightText ? (l > bg + 32) : (l < bg - 32)) ? Color.BLACK : Color.WHITE;
         }
-        if (candidateNumber != null && candidateNumber.equals(detected)) stableFrameCount++;
-        else { candidateNumber = detected; stableFrameCount = 1; }
-        lastOcrStatus = "OCR: " + detected;
+        Bitmap out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+        out.setPixels(px, 0, w, 0, 0, w, h);
+        return out;
+    }
 
-        if (stableFrameCount >= 2) {
-            boolean diff = (lastSubmittedOcrNumber == null) || !lastSubmittedOcrNumber.equals(detected);
-            boolean repeat = (lastSubmittedOcrNumber != null) && lastSubmittedOcrNumber.equals(detected) && blankFramesSinceSubmit >= 2;
-            if (diff || repeat) {
-                lastSubmittedOcrNumber = detected;
-                blankFramesSinceSubmit = 0;
-                submitSpinNumber(detected, "ocr");
+    private int lum(int c) { return (int) (0.299 * Color.red(c) + 0.587 * Color.green(c) + 0.114 * Color.blue(c)); }
+
+    private int[] thumb12(Bitmap b, int x, int y, int w, int h) {
+        int[] t = new int[144]; if (w <= 0 || h <= 0) return t;
+        for (int gy = 0; gy < 12; gy++) {
+            int py = Math.max(0, Math.min(b.getHeight() - 1, y + (gy * h) / 12));
+            for (int gx = 0; gx < 12; gx++) {
+                int px = Math.max(0, Math.min(b.getWidth() - 1, x + (gx * w) / 12));
+                t[gy * 12 + gx] = lum(b.getPixel(px, py));
             }
         }
-        updateInfoLabels();
+        return t;
     }
 
-    private void submitSpinNumber(int num, String source) {
+    private int diffThumb(int[] a, int[] b) {
+        if (a == null || b == null) return 0;
+        long s = 0; for (int i = 0; i < a.length; i++) s += Math.abs(a[i] - b[i]);
+        return (int) (s / a.length);
+    }
+
+    private Integer parseNum(String raw) {
+        if (raw == null) return null;
+        String s = raw.replace("\n", " ").trim();
+        if (s.isEmpty() || s.length() > 3) return null;
+        if (s.matches(".*[:.,$%xX₹].*")) return null;
+        s = s.replace(" ", "").replace('O', '0').replace('o', '0').replace('I', '1').replace('l', '1').replace('|', '1');
+        if (!s.matches("^[0-9]{1,2}$")) return null;
+        if (s.length() == 2 && s.startsWith("0")) return null; // Reject timers 00, 05, 09
+        int v = Integer.parseInt(s);
+        return (v >= 0 && v <= 36) ? v : null;
+    }
+
+    private void onOcrResult(Integer det, int[] nbr) {
+        if (!autoScan) return;
+        if (det == null) {
+            candNum = null; stableCnt = 0; blankCnt++;
+            if (blankCnt >= 2) readyRepeat = true;
+            ocrStatus = "BOX: --"; updateUI(); return;
+        }
+        long now = System.currentTimeMillis();
+        if (lastOcrNum != null && lastOcrNum.equals(det) && lastNbrThumb != null) {
+            int d = diffThumb(nbr, lastNbrThumb);
+            if (!histMode) {
+                staticNbrTicks = (d < 10) ? staticNbrTicks + 1 : 0;
+                if (staticNbrTicks >= 4) histMode = true;
+            } else if (d > 22 && (now - lastSubMs) >= 5000L) {
+                readyRepeat = true; // History bar shifted -> repeat detected!
+            }
+        }
+        if (candNum != null && candNum.equals(det)) stableCnt++; else { candNum = det; stableCnt = 1; }
+        if (stableCnt >= 2) {
+            boolean isDiff = (lastOcrNum == null) || !lastOcrNum.equals(det);
+            boolean isRep = (lastOcrNum != null) && lastOcrNum.equals(det) && readyRepeat && (now - lastSubMs) >= 4000L;
+            if (isDiff || isRep) {
+                lastOcrNum = det; lastSubMs = now; lastNbrThumb = nbr;
+                readyRepeat = false; blankCnt = 0; staticNbrTicks = 0; histMode = false;
+                ocrStatus = "ADDED: " + det;
+                submitSpin(det, "ocr"); return;
+            }
+            ocrStatus = "BOX: " + det;
+        } else ocrStatus = "READ: " + det + "?";
+        updateUI();
+    }
+
+    private void submitSpin(int num, String src) {
         if (num < 0 || num > 36) return;
-        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
-        try {
-            JSONArray pending = new JSONArray(prefs.getString(KEY_PENDING_SPINS, "[]"));
-            pending.put(num);
-            prefs.edit().putString(KEY_PENDING_SPINS, pending.toString()).apply();
-        } catch (Exception ignored) {}
-
-        int prevMult = currentMultiplier;
-        recalculateNativePreview();
-
-        // Trigger continuous Police Siren ONLY when entering 8X
-        if (prevMult != 8 && currentMultiplier == 8) {
-            startPoliceSiren(this);
-        }
-        updateInfoLabels();
-
-        Intent broadcast = new Intent(ACTION_NUMBER_SUBMITTED);
-        broadcast.setPackage(getPackageName());
-        broadcast.putExtra(EXTRA_NUMBER, num);
-        broadcast.putExtra(EXTRA_SOURCE, source);
-        sendBroadcast(broadcast);
-
-        String tag = "ocr".equals(source) ? "Auto OCR: " : "Spin Added: ";
-        Toast.makeText(this, tag + num + " -> " + currentPattern + "P | " + currentMultiplier + "X", Toast.LENGTH_SHORT).show();
+        appendPendingSpinSync(this, num);
+        int prevM = curMult;
+        recalcNative();
+        if (prevM != 8 && curMult == 8) startPoliceSiren(this);
+        updateUI();
+        sendBroadcast(new Intent(ACTION_NUMBER_SUBMITTED).setPackage(getPackageName())
+                .putExtra(EXTRA_NUMBER, num).putExtra(EXTRA_SOURCE, src));
+        Toast.makeText(this, ("ocr".equals(src) ? "Auto: " : "Spin: ") + num + " -> " + curPat + "P | " + curMult + "X", Toast.LENGTH_SHORT).show();
     }
 
-    private void recalculateNativePreview() {
-        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
-        List<Integer> allSpins = new ArrayList<>();
-        try {
-            JSONArray base = new JSONArray(prefs.getString(KEY_SPINS_JSON, "[]"));
-            for (int i = 0; i < base.length(); i++) { int v = base.optInt(i, -1); if (v >= 0 && v <= 36) allSpins.add(v); }
-            JSONArray pending = new JSONArray(prefs.getString(KEY_PENDING_SPINS, "[]"));
-            for (int i = 0; i < pending.length(); i++) { int v = pending.optInt(i, -1); if (v >= 0 && v <= 36) allSpins.add(v); }
-        } catch (Exception ignored) {}
-
-        Map<Integer, Set<Integer>> patternMap = loadNativePatterns(prefs);
-        int mult = 1, stepsRem = 0, totalUnit = 0;
-        int baseCounting = allSpins.isEmpty() ? 1 : allSpins.get(0);
-
-        for (int i = 0; i < allSpins.size(); i++) {
-            int spin = allSpins.get(i);
-            int pettan = (baseCounting + i) % 10;
-            Set<Integer> inPettan = patternMap.get(pettan);
-            int cutCount = 37 - (inPettan != null ? inPettan.size() : 0);
-            boolean isHit = inPettan == null || !inPettan.contains(spin);
-            totalUnit += (isHit ? (36 - cutCount) : -cutCount) * mult;
-
-            if (isHit) {
-                if (mult == 1) { mult = 2; stepsRem = 2; }
-                else { mult = 1; stepsRem = 0; }
-            } else if (mult > 1) {
-                stepsRem--;
-                if (stepsRem == 0) { mult = mult * 2; stepsRem = 2; }
-            }
+    private void recalcNative() {
+        SharedPreferences p = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        List<Integer> all = new ArrayList<>();
+        synchronized (QUEUE_LOCK) {
+            try {
+                JSONArray a = new JSONArray(p.getString(KEY_SPINS_JSON, "[]"));
+                for (int i = 0; i < a.length(); i++) { int v = a.optInt(i, -1); if (v >= 0 && v <= 36) all.add(v); }
+                JSONArray b = new JSONArray(p.getString(KEY_PENDING_SPINS, "[]"));
+                for (int i = 0; i < b.length(); i++) { int v = b.optInt(i, -1); if (v >= 0 && v <= 36) all.add(v); }
+            } catch (Exception ignored) {}
         }
-        int nextCounting = allSpins.isEmpty() ? 1 : baseCounting + allSpins.size();
-        currentPattern = nextCounting % 10;
-        currentMultiplier = mult;
-        currentIsPlaying = mult > 1;
-        currentTotalUnit = totalUnit;
-    }
-
-    private Map<Integer, Set<Integer>> loadNativePatterns(SharedPreferences prefs) {
-        Map<Integer, Set<Integer>> map = new HashMap<>();
-        for (int d = 0; d <= 9; d++) {
-            Set<Integer> set = new HashSet<>();
-            for (int n : DEFAULT_PATTERNS[d]) set.add(n);
-            map.put(d, set);
-        }
+        Map<Integer, Set<Integer>> pm = new HashMap<>();
+        for (int d = 0; d <= 9; d++) { Set<Integer> s = new HashSet<>(); for (int n : DEF_PAT[d]) s.add(n); pm.put(d, s); }
         try {
-            JSONObject obj = new JSONObject(prefs.getString(KEY_PATTERNS_JSON, "{}"));
+            JSONObject o = new JSONObject(p.getString(KEY_PATTERNS_JSON, "{}"));
             for (int d = 0; d <= 9; d++) {
-                JSONArray arr = obj.optJSONArray(String.valueOf(d));
+                JSONArray arr = o.optJSONArray(String.valueOf(d));
                 if (arr != null) {
-                    Set<Integer> custom = new HashSet<>();
-                    for (int i = 0; i < arr.length(); i++) { int n = arr.optInt(i, -1); if (n >= 0 && n <= 36) custom.add(n); }
-                    map.put(d, custom);
+                    Set<Integer> cs = new HashSet<>();
+                    for (int i = 0; i < arr.length(); i++) { int n = arr.optInt(i, -1); if (n >= 0 && n <= 36) cs.add(n); }
+                    pm.put(d, cs);
                 }
             }
         } catch (Exception ignored) {}
-        return map;
+
+        int mult = 1, rem = 0, unit = 0, base = all.isEmpty() ? 1 : all.get(0);
+        for (int i = 0; i < all.size(); i++) {
+            int sp = all.get(i), pat = (base + i) % 10;
+            Set<Integer> inP = pm.get(pat);
+            int cut = 37 - (inP != null ? inP.size() : 0);
+            boolean hit = inP == null || !inP.contains(sp);
+            unit += (hit ? (36 - cut) : -cut) * mult;
+            if (hit) { if (mult == 1) { mult = 2; rem = 2; } else { mult = 1; rem = 0; } }
+            else if (mult > 1 && --rem == 0) { mult *= 2; rem = 2; }
+        }
+        curPat = (all.isEmpty() ? 1 : base + all.size()) % 10;
+        curMult = mult; curPlay = mult > 1; curUnit = unit;
     }
 
     @SuppressWarnings("deprecation")
-    private int getOverlayWindowType() {
-        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
-                ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-                : WindowManager.LayoutParams.TYPE_PHONE;
-    }
+    private int winType() { return Build.VERSION.SDK_INT >= Build.VERSION_CODES.O ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY : WindowManager.LayoutParams.TYPE_PHONE; }
 
     private void createScanBox() {
-        if (scanBoxView != null) return;
-        if (windowManager == null) windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
-        if (windowManager == null) return;
+        if (scanBox != null) return;
+        if (wm == null) wm = (WindowManager) getSystemService(WINDOW_SERVICE);
+        int fl = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN | (boxLocked ? WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE : 0);
+        boxParams = new WindowManager.LayoutParams(dp(56), dp(50), winType(), fl, PixelFormat.TRANSLUCENT);
+        boxParams.gravity = Gravity.TOP | Gravity.START; boxParams.x = dp(130); boxParams.y = dp(240);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) boxParams.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
 
-        int flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN;
-        if (isBoxLocked) flags |= WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
+        scanBox = new FrameLayout(this);
+        scanBox.setBackground(bg("#00000000", boxLocked ? "#38BDF8" : "#22C55E", 2, 4)); // 100% clear interior!
+        resizeHandle = new View(this);
+        resizeHandle.setBackground(bg("#22C55E", "#FFFFFF", 1, 3));
+        resizeHandle.setVisibility(boxLocked ? View.GONE : View.VISIBLE);
+        scanBox.addView(resizeHandle, new FrameLayout.LayoutParams(dp(12), dp(12), Gravity.BOTTOM | Gravity.END));
 
-        scanBoxParams = new WindowManager.LayoutParams(dpToPx(74), dpToPx(64), getOverlayWindowType(), flags, PixelFormat.TRANSLUCENT);
-        scanBoxParams.gravity = Gravity.TOP | Gravity.START;
-        scanBoxParams.x = dpToPx(130);
-        scanBoxParams.y = dpToPx(240);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            scanBoxParams.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
-        }
-
-        scanBoxView = new FrameLayout(this);
-        scanBoxView.setBackground(makeRoundedBg("#1A22C55E", "#22C55E", 2, 8));
-
-        TextView label = new TextView(this);
-        label.setText("NO.");
-        label.setTextColor(Color.parseColor("#4ADE80"));
-        label.setTextSize(8f);
-        label.setTypeface(Typeface.DEFAULT_BOLD);
-        FrameLayout.LayoutParams lblLp = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.START);
-        lblLp.setMargins(dpToPx(4), dpToPx(2), 0, 0);
-        scanBoxView.addView(label, lblLp);
-
-        View resizeHandle = new View(this);
-        resizeHandle.setBackground(makeRoundedBg("#22C55E", "#FFFFFF", 1, 4));
-        scanBoxView.addView(resizeHandle, new FrameLayout.LayoutParams(dpToPx(16), dpToPx(16), Gravity.BOTTOM | Gravity.END));
-
-        scanBoxView.setOnTouchListener(new View.OnTouchListener() {
-            private int sx, sy; private float tx, ty;
+        scanBox.setOnTouchListener(new View.OnTouchListener() {
+            int sx, sy; float tx, ty;
             @Override public boolean onTouch(View v, MotionEvent e) {
-                if (isBoxLocked) return false;
-                if (e.getAction() == MotionEvent.ACTION_DOWN) { sx = scanBoxParams.x; sy = scanBoxParams.y; tx = e.getRawX(); ty = e.getRawY(); return true; }
+                if (boxLocked) return false;
+                if (e.getAction() == MotionEvent.ACTION_DOWN) { sx = boxParams.x; sy = boxParams.y; tx = e.getRawX(); ty = e.getRawY(); return true; }
                 if (e.getAction() == MotionEvent.ACTION_MOVE) {
-                    scanBoxParams.x = Math.max(0, sx + Math.round(e.getRawX() - tx));
-                    scanBoxParams.y = Math.max(0, sy + Math.round(e.getRawY() - ty));
-                    windowManager.updateViewLayout(scanBoxView, scanBoxParams);
-                    return true;
+                    boxParams.x = Math.max(0, sx + Math.round(e.getRawX() - tx));
+                    boxParams.y = Math.max(0, sy + Math.round(e.getRawY() - ty));
+                    wm.updateViewLayout(scanBox, boxParams); return true;
                 }
                 return false;
             }
         });
-
         resizeHandle.setOnTouchListener(new View.OnTouchListener() {
-            private int sw, sh; private float tx, ty;
+            int sw, sh; float tx, ty;
             @Override public boolean onTouch(View v, MotionEvent e) {
-                if (isBoxLocked) return false;
-                if (e.getAction() == MotionEvent.ACTION_DOWN) { sw = scanBoxParams.width; sh = scanBoxParams.height; tx = e.getRawX(); ty = e.getRawY(); return true; }
+                if (boxLocked) return false;
+                if (e.getAction() == MotionEvent.ACTION_DOWN) { sw = boxParams.width; sh = boxParams.height; tx = e.getRawX(); ty = e.getRawY(); return true; }
                 if (e.getAction() == MotionEvent.ACTION_MOVE) {
-                    scanBoxParams.width = Math.max(dpToPx(42), sw + Math.round(e.getRawX() - tx));
-                    scanBoxParams.height = Math.max(dpToPx(38), sh + Math.round(e.getRawY() - ty));
-                    windowManager.updateViewLayout(scanBoxView, scanBoxParams);
-                    return true;
+                    boxParams.width = Math.max(dp(34), sw + Math.round(e.getRawX() - tx));
+                    boxParams.height = Math.max(dp(32), sh + Math.round(e.getRawY() - ty));
+                    wm.updateViewLayout(scanBox, boxParams); return true;
                 }
                 return false;
             }
         });
-
-        windowManager.addView(scanBoxView, scanBoxParams);
-        isBoxVisible = true;
+        wm.addView(scanBox, boxParams);
+        boxVisible = true;
     }
 
-    private void toggleLockScanBox() {
-        if (scanBoxView == null || scanBoxParams == null || windowManager == null) return;
-        isBoxLocked = !isBoxLocked;
-        if (isBoxLocked) {
-            scanBoxParams.flags |= WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
-            scanBoxView.setBackground(makeRoundedBg("#0D22C55E", "#38BDF8", 2, 8));
-        } else {
-            scanBoxParams.flags &= ~WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
-            scanBoxView.setBackground(makeRoundedBg("#1A22C55E", "#22C55E", 2, 8));
-        }
-        windowManager.updateViewLayout(scanBoxView, scanBoxParams);
-        updateInfoLabels();
+    private void toggleLockBox() {
+        if (scanBox == null || boxParams == null || wm == null) return;
+        boxLocked = !boxLocked;
+        if (boxLocked) boxParams.flags |= WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
+        else boxParams.flags &= ~WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
+        scanBox.setBackground(bg("#00000000", boxLocked ? "#38BDF8" : "#22C55E", 2, 4));
+        if (resizeHandle != null) resizeHandle.setVisibility(boxLocked ? View.GONE : View.VISIBLE);
+        wm.updateViewLayout(scanBox, boxParams);
+        updateUI();
     }
 
     private void removeScanBox() {
-        if (scanBoxView != null && windowManager != null) {
-            try { windowManager.removeView(scanBoxView); } catch (Exception ignored) {}
-            scanBoxView = null;
-            scanBoxParams = null;
-        }
-        isBoxVisible = false;
+        if (scanBox != null && wm != null) { try { wm.removeView(scanBox); } catch (Exception ignored) {} scanBox = null; boxParams = null; }
+        boxVisible = false;
     }
 
     private void createOverlay() {
-        windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
-        if (windowManager == null) return;
+        wm = (WindowManager) getSystemService(WINDOW_SERVICE);
+        if (wm == null) return;
+        params = new WindowManager.LayoutParams(dp(194), dp(66), winType(),
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN, PixelFormat.TRANSLUCENT);
+        params.gravity = Gravity.TOP | Gravity.START; params.x = dp(14); params.y = dp(90);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) params.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
 
-        int flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN;
-        params = new WindowManager.LayoutParams(dpToPx(194), dpToPx(66), getOverlayWindowType(), flags, PixelFormat.TRANSLUCENT);
-        params.gravity = Gravity.TOP | Gravity.START;
-        params.x = dpToPx(14);
-        params.y = dpToPx(90);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            params.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
-        }
-
-        rootContainer = new FrameLayout(this);
-        pillView = buildPillView();
-        expandedView = buildExpandedKeypadView();
+        root = new FrameLayout(this);
+        pillView = buildPill();
+        expandedView = buildExpanded();
         expandedView.setVisibility(View.GONE);
-        rootContainer.addView(pillView);
-        rootContainer.addView(expandedView);
-        attachDragListener(pillView);
-        attachDragListener(expandedView);
-        windowManager.addView(rootContainer, params);
+        root.addView(pillView); root.addView(expandedView);
+        addDrag(pillView); addDrag(expandedView);
+        wm.addView(root, params);
     }
 
-    private LinearLayout buildPillView() {
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setGravity(Gravity.CENTER);
-        box.setLayoutParams(new FrameLayout.LayoutParams(dpToPx(194), dpToPx(66)));
-        box.setPadding(dpToPx(6), dpToPx(3), dpToPx(6), dpToPx(3));
-
-        pillHeadingText = new TextView(this);
-        pillHeadingText.setTextSize(9f);
-        pillHeadingText.setTypeface(Typeface.DEFAULT_BOLD);
-        pillHeadingText.setGravity(Gravity.CENTER);
-
-        pillInfoText = new TextView(this);
-        pillInfoText.setTextColor(Color.parseColor("#F8FAFC"));
-        pillInfoText.setTextSize(12.5f);
-        pillInfoText.setTypeface(Typeface.DEFAULT_BOLD);
-        pillInfoText.setGravity(Gravity.CENTER);
-        pillInfoText.setMaxLines(1);
-
-        pillOcrText = new TextView(this);
-        pillOcrText.setTextSize(9f);
-        pillOcrText.setTypeface(Typeface.DEFAULT_BOLD);
-        pillOcrText.setGravity(Gravity.CENTER);
-
-        box.addView(pillHeadingText);
-        box.addView(pillInfoText);
-        box.addView(pillOcrText);
-
-        box.setOnClickListener(v -> {
-            if (isSirenPlaying()) {
-                stopPoliceSiren(this);
-                updateInfoLabels();
-                Toast.makeText(this, "8X Police Siren OFF", Toast.LENGTH_SHORT).show();
-            } else {
-                toggleExpand(true);
-            }
+    private LinearLayout buildPill() {
+        LinearLayout b = new LinearLayout(this);
+        b.setOrientation(LinearLayout.VERTICAL); b.setGravity(Gravity.CENTER);
+        b.setLayoutParams(new FrameLayout.LayoutParams(dp(194), dp(66))); b.setPadding(dp(6), dp(3), dp(6), dp(3));
+        pillHead = mkTxt(9f); pillInfo = mkTxt(12.5f); pillInfo.setTextColor(Color.parseColor("#F8FAFC")); pillOcr = mkTxt(9f);
+        b.addView(pillHead); b.addView(pillInfo); b.addView(pillOcr);
+        b.setOnClickListener(v -> {
+            if (isSirenPlaying()) { stopPoliceSiren(this); updateUI(); Toast.makeText(this, "8X Siren OFF", Toast.LENGTH_SHORT).show(); }
+            else setExpanded(true);
         });
-        updateInfoLabels();
-        return box;
+        updateUI(); return b;
     }
 
-    private LinearLayout buildExpandedKeypadView() {
-        LinearLayout panel = new LinearLayout(this);
-        panel.setOrientation(LinearLayout.VERTICAL);
-        panel.setLayoutParams(new FrameLayout.LayoutParams(dpToPx(224), dpToPx(340)));
-        panel.setBackground(makeRoundedBg("#0F172A", "#38BDF8", 2, 12));
-        panel.setPadding(dpToPx(5), dpToPx(5), dpToPx(5), dpToPx(5));
+    private LinearLayout buildExpanded() {
+        LinearLayout p = new LinearLayout(this);
+        p.setOrientation(LinearLayout.VERTICAL);
+        p.setLayoutParams(new FrameLayout.LayoutParams(dp(224), dp(344)));
+        p.setBackground(bg("#0F172A", "#38BDF8", 2, 12)); p.setPadding(dp(5), dp(5), dp(5), dp(5));
 
-        LinearLayout topBar = new LinearLayout(this);
-        topBar.setOrientation(LinearLayout.HORIZONTAL);
-        topBar.setGravity(Gravity.CENTER_VERTICAL);
-        LinearLayout.LayoutParams topLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dpToPx(30));
-        topLp.bottomMargin = dpToPx(3);
-        topBar.setLayoutParams(topLp);
-
-        Button collapseBtn = new Button(this);
-        collapseBtn.setText("-");
-        collapseBtn.setTextColor(Color.WHITE);
-        collapseBtn.setTextSize(12f);
-        collapseBtn.setBackground(makeRoundedBg("#334155", "#475569", 1, 6));
-        collapseBtn.setPadding(0, 0, 0, 0);
-        collapseBtn.setLayoutParams(new LinearLayout.LayoutParams(dpToPx(28), dpToPx(28)));
-        collapseBtn.setOnClickListener(v -> toggleExpand(false));
-
-        selectedNumberText = new TextView(this);
-        selectedNumberText.setText("NO: --");
-        selectedNumberText.setTextColor(Color.parseColor("#FACC15"));
-        selectedNumberText.setTextSize(11.5f);
-        selectedNumberText.setTypeface(Typeface.DEFAULT_BOLD);
-        selectedNumberText.setGravity(Gravity.CENTER);
-        selectedNumberText.setLayoutParams(new LinearLayout.LayoutParams(0, dpToPx(28), 1f));
-
-        Button goBtn = new Button(this);
-        goBtn.setText("GO");
-        goBtn.setTextColor(Color.parseColor("#052E16"));
-        goBtn.setTextSize(11f);
-        goBtn.setTypeface(Typeface.DEFAULT_BOLD);
-        goBtn.setBackground(makeRoundedBg("#22C55E", "#16A34A", 1, 6));
-        goBtn.setPadding(0, 0, 0, 0);
-        goBtn.setLayoutParams(new LinearLayout.LayoutParams(dpToPx(44), dpToPx(28)));
-        goBtn.setOnClickListener(v -> {
-            if (selectedNumber == null) {
-                Toast.makeText(this, "0 se 36 ke beech number chunein", Toast.LENGTH_SHORT).show();
-                return;
-            }
-            submitSpinNumber(selectedNumber, "manual");
-            selectedNumber = null;
-            selectedNumberText.setText("NO: --");
+        LinearLayout top = new LinearLayout(this); top.setOrientation(LinearLayout.HORIZONTAL); top.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(-1, dp(30)); tlp.bottomMargin = dp(3); top.setLayoutParams(tlp);
+        Button col = mkBtn("-", "#334155", "#475569", dp(28), dp(28)); col.setOnClickListener(v -> setExpanded(false));
+        selText = mkTxt(11.5f); selText.setText("NO: --"); selText.setTextColor(Color.parseColor("#FACC15"));
+        selText.setLayoutParams(new LinearLayout.LayoutParams(0, dp(28), 1f));
+        Button go = mkBtn("GO", "#22C55E", "#16A34A", dp(44), dp(28)); go.setTextColor(Color.parseColor("#052E16"));
+        go.setOnClickListener(v -> {
+            if (selNum == null) { Toast.makeText(this, "Number chunein", Toast.LENGTH_SHORT).show(); return; }
+            submitSpin(selNum, "manual"); selNum = null; selText.setText("NO: --");
         });
+        top.addView(col); top.addView(selText); top.addView(go); p.addView(top);
 
-        topBar.addView(collapseBtn);
-        topBar.addView(selectedNumberText);
-        topBar.addView(goBtn);
-        panel.addView(topBar);
+        sirenBtn = mkBtn("STOP 8X SIREN (OFF)", "#DC2626", "#FCA5A5", -1, dp(26));
+        ((LinearLayout.LayoutParams) sirenBtn.getLayoutParams()).bottomMargin = dp(3);
+        sirenBtn.setVisibility(View.GONE);
+        sirenBtn.setOnClickListener(v -> { stopPoliceSiren(this); updateUI(); Toast.makeText(this, "8X Siren OFF", Toast.LENGTH_SHORT).show(); });
+        p.addView(sirenBtn);
 
-        stopSirenBtn = new Button(this);
-        stopSirenBtn.setText("STOP 8X SIREN (OFF)");
-        stopSirenBtn.setTextColor(Color.WHITE);
-        stopSirenBtn.setTextSize(10f);
-        stopSirenBtn.setTypeface(Typeface.DEFAULT_BOLD);
-        stopSirenBtn.setPadding(0, 0, 0, 0);
-        stopSirenBtn.setBackground(makeRoundedBg("#DC2626", "#FCA5A5", 1, 6));
-        LinearLayout.LayoutParams sirenLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dpToPx(26));
-        sirenLp.bottomMargin = dpToPx(3);
-        stopSirenBtn.setLayoutParams(sirenLp);
-        stopSirenBtn.setVisibility(View.GONE);
-        stopSirenBtn.setOnClickListener(v -> {
-            stopPoliceSiren(this);
-            updateInfoLabels();
-            Toast.makeText(this, "8X Police Siren OFF", Toast.LENGTH_SHORT).show();
+        LinearLayout row = new LinearLayout(this); row.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(-1, dp(26)); rlp.bottomMargin = dp(3); row.setLayoutParams(rlp);
+        scanBtn = mkBtn("AUTO: OFF", "#334155", "#475569", 0, dp(26));
+        LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(0, dp(26), 1f); slp.rightMargin = dp(3); scanBtn.setLayoutParams(slp);
+        scanBtn.setOnClickListener(v -> {
+            if (!capturing) { Toast.makeText(this, "App se START AUTO CAPTURE dabayein", Toast.LENGTH_SHORT).show(); return; }
+            autoScan = !autoScan; ocrStatus = autoScan ? "BOX: --" : "PAUSED"; sendCapBroadcast(); updateUI();
         });
-        panel.addView(stopSirenBtn);
+        lockBtn = mkBtn("LOCK BOX", "#334155", "#475569", 0, dp(26));
+        lockBtn.setLayoutParams(new LinearLayout.LayoutParams(0, dp(26), 1f));
+        lockBtn.setOnClickListener(v -> { if (!boxVisible) createScanBox(); else toggleLockBox(); });
+        row.addView(scanBtn); row.addView(lockBtn); p.addView(row);
 
-        LinearLayout ocrRow = new LinearLayout(this);
-        ocrRow.setOrientation(LinearLayout.HORIZONTAL);
-        LinearLayout.LayoutParams ocrRowLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dpToPx(26));
-        ocrRowLp.bottomMargin = dpToPx(3);
-        ocrRow.setLayoutParams(ocrRowLp);
+        expInfo = mkTxt(11f); expInfo.setTextColor(Color.parseColor("#F8FAFC")); expInfo.setBackground(bg("#1E293B", "#334155", 1, 6));
+        LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(-1, dp(26)); ilp.bottomMargin = dp(3); expInfo.setLayoutParams(ilp);
+        p.addView(expInfo);
 
-        scanToggleBtn = new Button(this);
-        scanToggleBtn.setTextColor(Color.WHITE);
-        scanToggleBtn.setTextSize(9.5f);
-        scanToggleBtn.setTypeface(Typeface.DEFAULT_BOLD);
-        scanToggleBtn.setPadding(0, 0, 0, 0);
-        LinearLayout.LayoutParams scanLp = new LinearLayout.LayoutParams(0, dpToPx(26), 1f);
-        scanLp.rightMargin = dpToPx(3);
-        scanToggleBtn.setLayoutParams(scanLp);
-        scanToggleBtn.setOnClickListener(v -> {
-            if (!isCapturing) {
-                Toast.makeText(this, "App se START AUTO CAPTURE dabaiye", Toast.LENGTH_SHORT).show();
-                return;
-            }
-            isAutoScanning = !isAutoScanning;
-            lastOcrStatus = isAutoScanning ? "AUTO: ON" : "PAUSED";
-            broadcastCaptureStatus();
-            updateInfoLabels();
-        });
-
-        lockBoxBtn = new Button(this);
-        lockBoxBtn.setTextColor(Color.WHITE);
-        lockBoxBtn.setTextSize(9.5f);
-        lockBoxBtn.setTypeface(Typeface.DEFAULT_BOLD);
-        lockBoxBtn.setPadding(0, 0, 0, 0);
-        lockBoxBtn.setLayoutParams(new LinearLayout.LayoutParams(0, dpToPx(26), 1f));
-        lockBoxBtn.setOnClickListener(v -> {
-            if (!isBoxVisible) createScanBox(); else toggleLockScanBox();
-            updateInfoLabels();
-        });
-
-        ocrRow.addView(scanToggleBtn);
-        ocrRow.addView(lockBoxBtn);
-        panel.addView(ocrRow);
-
-        expandedInfoText = new TextView(this);
-        expandedInfoText.setTextColor(Color.parseColor("#F8FAFC"));
-        expandedInfoText.setTextSize(11.5f);
-        expandedInfoText.setTypeface(Typeface.DEFAULT_BOLD);
-        expandedInfoText.setGravity(Gravity.CENTER);
-        expandedInfoText.setBackground(makeRoundedBg("#1E293B", "#334155", 1, 6));
-        LinearLayout.LayoutParams infoLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dpToPx(26));
-        infoLp.bottomMargin = dpToPx(3);
-        expandedInfoText.setLayoutParams(infoLp);
-        panel.addView(expandedInfoText);
-
-        GridLayout grid = new GridLayout(this);
-        grid.setColumnCount(7);
-        grid.setRowCount(6);
-        grid.setLayoutParams(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
-        int cellW = dpToPx(28), cellH = dpToPx(31), m = dpToPx(1);
-
+        GridLayout g = new GridLayout(this); g.setColumnCount(7); g.setRowCount(6);
+        g.setLayoutParams(new LinearLayout.LayoutParams(-1, 0, 1f));
+        int cw = dp(28), ch = dp(30), m = dp(1);
         for (int n = 0; n <= 36; n++) {
             final int num = n;
-            Button btn = new Button(this);
-            btn.setText(String.valueOf(num));
-            btn.setTextSize(10f);
-            btn.setTextColor(Color.WHITE);
-            btn.setPadding(0, 0, 0, 0);
-            btn.setFocusable(false);
-            btn.setFocusableInTouchMode(false);
-            String bgHex = (num == 0) ? "#15803D" : (isRed(num) ? "#B91C1C" : "#1E293B");
-            btn.setBackground(makeRoundedBg(bgHex, "#334155", 1, 4));
-            GridLayout.LayoutParams glp = new GridLayout.LayoutParams();
-            glp.width = cellW; glp.height = cellH; glp.setMargins(m, m, m, m);
-            btn.setLayoutParams(glp);
-            btn.setOnClickListener(v -> { selectedNumber = num; selectedNumberText.setText("NO: " + num); });
-            grid.addView(btn);
+            Button bt = mkBtn(String.valueOf(n), n == 0 ? "#15803D" : (isRed(n) ? "#B91C1C" : "#1E293B"), "#334155", cw, ch);
+            GridLayout.LayoutParams glp = new GridLayout.LayoutParams(); glp.width = cw; glp.height = ch; glp.setMargins(m, m, m, m); bt.setLayoutParams(glp);
+            bt.setOnClickListener(v -> { selNum = num; selText.setText("NO: " + num); });
+            g.addView(bt);
         }
-
-        Button clrBtn = new Button(this);
-        clrBtn.setText("C");
-        clrBtn.setTextSize(10f);
-        clrBtn.setTextColor(Color.WHITE);
-        clrBtn.setPadding(0, 0, 0, 0);
-        clrBtn.setBackground(makeRoundedBg("#475569", "#64748B", 1, 4));
-        GridLayout.LayoutParams clrLp = new GridLayout.LayoutParams();
-        clrLp.width = cellW; clrLp.height = cellH; clrLp.setMargins(m, m, m, m);
-        clrBtn.setLayoutParams(clrLp);
-        clrBtn.setOnClickListener(v -> { selectedNumber = null; selectedNumberText.setText("NO: --"); });
-        grid.addView(clrBtn);
-        panel.addView(grid);
-
-        updateInfoLabels();
-        return panel;
+        Button rep = mkBtn("R", "#0284C7", "#38BDF8", cw, ch);
+        GridLayout.LayoutParams rglp = new GridLayout.LayoutParams(); rglp.width = cw; rglp.height = ch; rglp.setMargins(m, m, m, m); rep.setLayoutParams(rglp);
+        rep.setOnClickListener(v -> { if (lastOcrNum != null) submitSpin(lastOcrNum, "manual"); else Toast.makeText(this, "Koi last number nahi", Toast.LENGTH_SHORT).show(); });
+        g.addView(rep);
+        p.addView(g);
+        updateUI(); return p;
     }
 
-    private void updateInfoLabels() {
-        boolean sirenOn = isSirenPlaying();
-        String mode = currentMultiplier == 8 ? "8X ALERT" : (currentIsPlaying ? "PLAY NOW" : "BASE MODE");
-        String info = currentPattern + "P  •  BET " + currentMultiplier + "X";
-        String unitSign = currentTotalUnit > 0 ? "+" + currentTotalUnit : String.valueOf(currentTotalUnit);
-
-        if (pillView != null) {
-            if (sirenOn) {
-                pillView.setBackground(makeRoundedBg("#991B1B", "#FCA5A5", 2, 12));
-            } else if (currentMultiplier == 8) {
-                pillView.setBackground(makeRoundedBg("#450A0A", "#EF4444", 2, 12));
-            } else {
-                pillView.setBackground(makeRoundedBg(currentIsPlaying ? "#0B2922" : "#0F172A", currentIsPlaying ? "#22C55E" : "#38BDF8", 2, 12));
-            }
-        }
-        if (pillHeadingText != null) {
-            if (sirenOn) {
-                pillHeadingText.setText("8X SIREN ON - TAP TO OFF");
-                pillHeadingText.setTextColor(Color.parseColor("#FEF08A"));
-            } else {
-                pillHeadingText.setText(mode + "  |  U: " + unitSign);
-                pillHeadingText.setTextColor(Color.parseColor(currentMultiplier == 8 ? "#FCA5A5" : (currentIsPlaying ? "#4ADE80" : "#38BDF8")));
-            }
-        }
-        if (pillInfoText != null) pillInfoText.setText(info);
-        if (pillOcrText != null) {
-            pillOcrText.setText(sirenOn ? "TAP HERE TO STOP SIREN" : lastOcrStatus);
-            pillOcrText.setTextColor(Color.parseColor(sirenOn ? "#FFFFFF" : (isAutoScanning ? "#FACC15" : "#94A3B8")));
-        }
-        if (stopSirenBtn != null) {
-            stopSirenBtn.setVisibility(sirenOn ? View.VISIBLE : View.GONE);
-        }
-        if (expandedInfoText != null) expandedInfoText.setText(mode + " | " + info + " | U:" + unitSign);
-        if (scanToggleBtn != null) {
-            scanToggleBtn.setText(isAutoScanning ? "AUTO: ON" : "AUTO: OFF");
-            scanToggleBtn.setBackground(makeRoundedBg(isAutoScanning ? "#15803D" : "#334155", isAutoScanning ? "#22C55E" : "#475569", 1, 6));
-        }
-        if (lockBoxBtn != null) {
-            lockBoxBtn.setText(isBoxLocked ? "UNLOCK BOX" : "LOCK BOX");
-            lockBoxBtn.setBackground(makeRoundedBg(isBoxLocked ? "#0369A1" : "#334155", isBoxLocked ? "#38BDF8" : "#475569", 1, 6));
-        }
+    private TextView mkTxt(float sp) {
+        TextView t = new TextView(this); t.setTextSize(sp); t.setTypeface(Typeface.DEFAULT_BOLD); t.setGravity(Gravity.CENTER); t.setMaxLines(1); return t;
     }
 
-    private void toggleExpand(boolean expand) {
-        if (rootContainer == null || params == null || windowManager == null) return;
-        if (expand) {
-            pillView.setVisibility(View.GONE);
-            expandedView.setVisibility(View.VISIBLE);
-            params.width = dpToPx(224);
-            params.height = dpToPx(340);
-        } else {
-            expandedView.setVisibility(View.GONE);
-            pillView.setVisibility(View.VISIBLE);
-            params.width = dpToPx(194);
-            params.height = dpToPx(66);
-        }
-        windowManager.updateViewLayout(rootContainer, params);
+    private Button mkBtn(String txt, String fill, String stroke, int w, int h) {
+        Button b = new Button(this); b.setText(txt); b.setTextColor(Color.WHITE); b.setTextSize(9.5f);
+        b.setTypeface(Typeface.DEFAULT_BOLD); b.setPadding(0, 0, 0, 0); b.setFocusable(false);
+        b.setBackground(bg(fill, stroke, 1, 5)); b.setLayoutParams(new LinearLayout.LayoutParams(w, h)); return b;
     }
 
-    private void attachDragListener(View target) {
-        target.setOnTouchListener(new View.OnTouchListener() {
-            private int ix, iy; private float tx, ty; private boolean moved;
-            @Override public boolean onTouch(View v, MotionEvent e) {
-                switch (e.getAction()) {
-                    case MotionEvent.ACTION_DOWN:
-                        ix = params.x; iy = params.y; tx = e.getRawX(); ty = e.getRawY(); moved = false; return false;
-                    case MotionEvent.ACTION_MOVE:
-                        int dx = Math.round(e.getRawX() - tx), dy = Math.round(e.getRawY() - ty);
-                        if (Math.abs(dx) > 6 || Math.abs(dy) > 6) {
-                            moved = true;
-                            params.x = Math.max(0, ix + dx);
-                            params.y = Math.max(0, iy + dy);
-                            if (rootContainer != null && windowManager != null) windowManager.updateViewLayout(rootContainer, params);
-                        }
-                        return moved;
-                    case MotionEvent.ACTION_UP:
-                        if (moved) return true;
-                        v.performClick();
-                        return true;
+    private void updateUI() {
+        boolean sir = isSirenPlaying();
+        String mode = curMult == 8 ? "8X ALERT" : (curPlay ? "PLAY NOW" : "BASE MODE");
+        String info = curPat + "P  •  BET " + curMult + "X";
+        String u = curUnit > 0 ? "+" + curUnit : String.valueOf(curUnit);
+        if (pillView != null) pillView.setBackground(sir ? bg("#991B1B", "#FCA5A5", 2, 12)
+                : (curMult == 8 ? bg("#450A0A", "#EF4444", 2, 12) : bg(curPlay ? "#0B2922" : "#0F172A", curPlay ? "#22C55E" : "#38BDF8", 2, 12)));
+        if (pillHead != null) {
+            pillHead.setText(sir ? "8X SIREN ON - TAP TO OFF" : (mode + " | U: " + u));
+            pillHead.setTextColor(Color.parseColor(sir ? "#FEF08A" : (curMult == 8 ? "#FCA5A5" : (curPlay ? "#4ADE80" : "#38BDF8"))));
+        }
+        if (pillInfo != null) pillInfo.setText(info);
+        if (pillOcr != null) { pillOcr.setText(sir ? "TAP HERE TO STOP SIREN" : ocrStatus); pillOcr.setTextColor(Color.parseColor(sir ? "#FFFFFF" : (autoScan ? "#FACC15" : "#94A3B8"))); }
+        if (sirenBtn != null) sirenBtn.setVisibility(sir ? View.VISIBLE : View.GONE);
+        if (expInfo != null) expInfo.setText(mode + " | " + info + " | U:" + u);
+        if (scanBtn != null) { scanBtn.setText(autoScan ? "AUTO: ON" : "AUTO: OFF"); scanBtn.setBackground(bg(autoScan ? "#15803D" : "#334155", autoScan ? "#22C55E" : "#475569", 1, 5)); }
+        if (lockBtn != null) { lockBtn.setText(boxLocked ? "UNLOCK BOX" : "LOCK BOX"); lockBtn.setBackground(bg(boxLocked ? "#0369A1" : "#334155", boxLocked ? "#38BDF8" : "#475569", 1, 5)); }
+    }
+
+    private void setExpanded(boolean ex) {
+        if (root == null || params == null || wm == null) return;
+        pillView.setVisibility(ex ? View.GONE : View.VISIBLE);
+        expandedView.setVisibility(ex ? View.VISIBLE : View.GONE);
+        params.width = dp(ex ? 224 : 194); params.height = dp(ex ? 344 : 66);
+        wm.updateViewLayout(root, params);
+    }
+
+    private void addDrag(View v) {
+        v.setOnTouchListener(new View.OnTouchListener() {
+            int ix, iy; float tx, ty; boolean mv;
+            @Override public boolean onTouch(View view, MotionEvent e) {
+                if (e.getAction() == MotionEvent.ACTION_DOWN) { ix = params.x; iy = params.y; tx = e.getRawX(); ty = e.getRawY(); mv = false; return false; }
+                if (e.getAction() == MotionEvent.ACTION_MOVE) {
+                    int dx = Math.round(e.getRawX() - tx), dy = Math.round(e.getRawY() - ty);
+                    if (Math.abs(dx) > 6 || Math.abs(dy) > 6) {
+                        mv = true; params.x = Math.max(0, ix + dx); params.y = Math.max(0, iy + dy);
+                        if (root != null && wm != null) wm.updateViewLayout(root, params);
+                    }
+                    return mv;
                 }
+                if (e.getAction() == MotionEvent.ACTION_UP) { if (mv) return true; view.performClick(); return true; }
                 return false;
             }
         });
     }
 
-    private boolean isRed(int n) {
-        int[] reds = {1, 3, 5, 7, 9, 12, 14, 16, 18, 19, 21, 23, 25, 27, 30, 32, 34, 36};
-        for (int r : reds) if (r == n) return true;
-        return false;
-    }
+    private boolean isRed(int n) { for (int r : new int[]{1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36}) if (r == n) return true; return false; }
+    private GradientDrawable bg(String f, String s, int sw, int r) { GradientDrawable g = new GradientDrawable(); g.setColor(Color.parseColor(f)); g.setStroke(dp(sw), Color.parseColor(s)); g.setCornerRadius(dp(r)); return g; }
+    private int dp(int v) { return Math.round(v * getResources().getDisplayMetrics().density); }
+    private void removeOverlay() { if (root != null && wm != null) { try { wm.removeView(root); } catch (Exception ignored) {} root = null; } }
 
-    private GradientDrawable makeRoundedBg(String fillHex, String strokeHex, int strokeDp, int radiusDp) {
-        GradientDrawable gd = new GradientDrawable();
-        gd.setColor(Color.parseColor(fillHex));
-        gd.setStroke(dpToPx(strokeDp), Color.parseColor(strokeHex));
-        gd.setCornerRadius(dpToPx(radiusDp));
-        return gd;
-    }
-
-    private int dpToPx(int dp) {
-        return Math.round(dp * getResources().getDisplayMetrics().density);
-    }
-
-    private void removeOverlay() {
-        if (rootContainer != null && windowManager != null) {
-            try { windowManager.removeView(rootContainer); } catch (Exception ignored) {}
-            rootContainer = null;
-        }
-    }
-
-    @Override
-    public void onDestroy() {
-        isRunning = false;
-        stopPoliceSiren(this);
-        stopScreenCaptureInternal();
-        removeScanBox();
-        removeOverlay();
-        if (textRecognizer != null) { try { textRecognizer.close(); } catch (Exception ignored) {} }
+    @Override public void onDestroy() {
+        isRunning = false; stopPoliceSiren(this); stopCapture(); removeScanBox(); removeOverlay();
+        if (ocr != null) { try { ocr.close(); } catch (Exception ignored) {} }
         super.onDestroy();
     }
 }
