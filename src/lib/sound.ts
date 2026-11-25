@@ -16,6 +16,10 @@ const HINDI_MELODY_MISS = [
 let audioCtx: AudioContext | null = null;
 let enabled = true;
 
+let sirenOsc: OscillatorNode | null = null;
+let sirenLfo: OscillatorNode | null = null;
+let sirenGain: GainNode | null = null;
+
 export function setSoundEnabled(on: boolean) {
   enabled = on;
 }
@@ -23,7 +27,9 @@ export function setSoundEnabled(on: boolean) {
 function getCtx(): AudioContext | null {
   try {
     if (!audioCtx) {
-      const Ctor = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      const Ctor =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
       audioCtx = new Ctor();
     }
     if (audioCtx.state === 'suspended') audioCtx.resume();
@@ -74,4 +80,67 @@ export function playClick() {
 
 export function playMelody(type: 'HIT' | 'MISS') {
   playNotes(type === 'HIT' ? HINDI_MELODY_HIT : HINDI_MELODY_MISS, 'triangle', 0.18);
+}
+
+export function startPoliceSiren() {
+  if (sirenOsc) return;
+  const ctx = getCtx();
+  if (!ctx) return;
+  try {
+    const osc = ctx.createOscillator();
+    const lfo = ctx.createOscillator();
+    const lfoGain = ctx.createGain();
+    const filter = ctx.createBiquadFilter();
+    const masterGain = ctx.createGain();
+
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(1015, ctx.currentTime);
+
+    lfo.type = 'sine';
+    lfo.frequency.setValueAtTime(0.85, ctx.currentTime);
+    lfoGain.gain.setValueAtTime(365, ctx.currentTime);
+
+    filter.type = 'lowpass';
+    filter.frequency.setValueAtTime(2200, ctx.currentTime);
+
+    masterGain.gain.setValueAtTime(0.28, ctx.currentTime);
+
+    lfo.connect(lfoGain);
+    lfoGain.connect(osc.frequency);
+    osc.connect(filter);
+    filter.connect(masterGain);
+    masterGain.connect(ctx.destination);
+
+    osc.start();
+    lfo.start();
+
+    sirenOsc = osc;
+    sirenLfo = lfo;
+    sirenGain = masterGain;
+  } catch {
+    // Ignore audio errors
+  }
+}
+
+export function stopPoliceSiren() {
+  try {
+    sirenOsc?.stop();
+    sirenOsc?.disconnect();
+  } catch {
+    // Ignore
+  }
+  try {
+    sirenLfo?.stop();
+    sirenLfo?.disconnect();
+  } catch {
+    // Ignore
+  }
+  try {
+    sirenGain?.disconnect();
+  } catch {
+    // Ignore
+  }
+  sirenOsc = null;
+  sirenLfo = null;
+  sirenGain = null;
 }
