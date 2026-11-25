@@ -49,6 +49,8 @@ export default function App() {
   const soundOnRef = useRef<boolean>(soundOn);
   soundOnRef.current = soundOn;
 
+  const drainingRef = useRef<boolean>(false);
+
   const triggerSiren = useCallback(() => {
     setSirenActive(true);
     vibrate([200, 100, 200, 100, 300]);
@@ -106,7 +108,6 @@ export default function App() {
         const nextState = calculateRecords(nextSpins, patternsRef.current);
         const last = nextState.records[nextState.records.length - 1];
 
-        // Trigger Police Siren ONLY when entering 8X
         if (!fromNative && prevState.nextMult !== 8 && nextState.nextMult === 8) {
           triggerSiren();
         } else if (last) {
@@ -142,7 +143,8 @@ export default function App() {
   }, []);
 
   const drainNativeQueue = useCallback(async () => {
-    if (!isAndroidNative()) return;
+    if (!isAndroidNative() || drainingRef.current) return;
+    drainingRef.current = true;
     try {
       const { spins: pending } = await FloatingOverlay.drainPendingSpins();
       if (Array.isArray(pending) && pending.length > 0) {
@@ -150,6 +152,8 @@ export default function App() {
       }
     } catch {
       // Ignore
+    } finally {
+      drainingRef.current = false;
     }
     syncNativeSirenStatus();
   }, [applySpinNumbers, syncNativeSirenStatus]);
@@ -188,10 +192,18 @@ export default function App() {
       }
     };
 
+    // Safety poll while app is visible so zero background spins are ever missed
+    const pollTimer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        drainNativeQueue();
+      }
+    }, 1500);
+
     document.addEventListener('visibilitychange', onResume);
     window.addEventListener('focus', drainNativeQueue);
 
     return () => {
+      window.clearInterval(pollTimer);
       document.removeEventListener('visibilitychange', onResume);
       window.removeEventListener('focus', drainNativeQueue);
       spinHandle?.remove();
