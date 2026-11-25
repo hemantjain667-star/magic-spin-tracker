@@ -50,6 +50,10 @@ public class FloatingOverlayPlugin extends Plugin {
                     data.put("capturing", intent.getBooleanExtra(FloatingOverlayService.EXTRA_CAPTURING, false));
                     data.put("scanning", intent.getBooleanExtra(FloatingOverlayService.EXTRA_SCANNING, false));
                     notifyListeners("captureStatusChanged", data);
+                } else if (FloatingOverlayService.ACTION_SIREN_STATUS.equals(intent.getAction())) {
+                    JSObject data = new JSObject();
+                    data.put("playing", intent.getBooleanExtra(FloatingOverlayService.EXTRA_SIREN_PLAYING, false));
+                    notifyListeners("sirenStatusChanged", data);
                 }
             }
         };
@@ -57,6 +61,7 @@ public class FloatingOverlayPlugin extends Plugin {
         IntentFilter filter = new IntentFilter();
         filter.addAction(FloatingOverlayService.ACTION_NUMBER_SUBMITTED);
         filter.addAction(FloatingOverlayService.ACTION_CAPTURE_STATUS);
+        filter.addAction(FloatingOverlayService.ACTION_SIREN_STATUS);
         ContextCompat.registerReceiver(
                 getContext(),
                 overlayReceiver,
@@ -165,6 +170,35 @@ public class FloatingOverlayPlugin extends Plugin {
         getContext().startService(serviceIntent);
         JSObject res = new JSObject();
         res.put("visible", true);
+        call.resolve(res);
+    }
+
+    @PluginMethod
+    public void startSiren(PluginCall call) {
+        FloatingOverlayService.startPoliceSiren(getContext());
+        if (FloatingOverlayService.isRunning) {
+            Intent serviceIntent = new Intent(getContext(), FloatingOverlayService.class);
+            serviceIntent.setAction(FloatingOverlayService.ACTION_REFRESH_UI);
+            getContext().startService(serviceIntent);
+        }
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void stopSiren(PluginCall call) {
+        FloatingOverlayService.stopPoliceSiren(getContext());
+        if (FloatingOverlayService.isRunning) {
+            Intent serviceIntent = new Intent(getContext(), FloatingOverlayService.class);
+            serviceIntent.setAction(FloatingOverlayService.ACTION_REFRESH_UI);
+            getContext().startService(serviceIntent);
+        }
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void getSirenState(PluginCall call) {
+        JSObject res = new JSObject();
+        res.put("playing", FloatingOverlayService.isSirenPlaying());
         call.resolve(res);
     }
 
