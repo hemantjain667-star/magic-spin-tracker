@@ -12,6 +12,7 @@ import {
   ScanEye,
   Square,
   Crosshair,
+  BellOff,
 } from 'lucide-react';
 import { calculateRecords, type PatternMap, type SpinRecord } from '@/lib/game';
 import { playClick } from '@/lib/sound';
@@ -24,6 +25,7 @@ interface DashboardProps {
   soundOn: boolean;
   isPinned: boolean;
   isCapturing: boolean;
+  sirenActive: boolean;
   onToggleSound: () => void;
   onAddSpin: (num: number) => void;
   onUndo: () => void;
@@ -33,6 +35,7 @@ interface DashboardProps {
   onToggleCapture: () => void;
   onToggleTargetBox: () => void;
   onOpenPatternEditor: () => void;
+  onStopSiren: () => void;
 }
 
 function fmt(n: number) {
@@ -45,6 +48,7 @@ export default function Dashboard({
   soundOn,
   isPinned,
   isCapturing,
+  sirenActive,
   onToggleSound,
   onAddSpin,
   onUndo,
@@ -54,6 +58,7 @@ export default function Dashboard({
   onToggleCapture,
   onToggleTargetBox,
   onOpenPatternEditor,
+  onStopSiren,
 }: DashboardProps) {
   const [input, setInput] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
@@ -90,6 +95,16 @@ export default function Dashboard({
       style={{ fontFamily: 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif' }}
     >
       <div className="max-w-[680px] mx-auto p-3 sm:p-4">
+        {sirenActive && (
+          <button
+            onClick={onStopSiren}
+            className="w-full mb-3 py-3.5 px-4 rounded-2xl bg-gradient-to-r from-[#dc2626] via-[#ef4444] to-[#b91c1c] border-2 border-[#fecaca] text-white font-black text-sm tracking-wider shadow-[0_0_30px_rgba(239,68,68,0.65)] animate-pulse flex items-center justify-center gap-2 active:scale-95 transition"
+          >
+            <BellOff className="w-5 h-5" />
+            🚨 8X POLICE SIREN ON — OFF KARNE KE LIYE TAP KAREIN 🚨
+          </button>
+        )}
+
         <div className="relative overflow-hidden rounded-3xl border border-[#405273] mb-3 shadow-[0_10px_40px_rgba(0,0,0,0.5)]">
           <RouletteArt />
           <div className="absolute inset-0 bg-gradient-to-t from-[#090d18] via-[#090d18]/40 to-transparent" />
@@ -198,24 +213,28 @@ export default function Dashboard({
 
         <div
           className={`rounded-2xl p-4 mb-4 text-center border-[1.5px] transition-colors ${
-            state.isNextPlay
-              ? 'border-[#35df91] bg-gradient-to-b from-[#173b3a] to-[#101d2b] shadow-[0_0_25px_rgba(53,223,145,0.25)] animate-[badgeBlink_1s_ease-in-out_infinite]'
-              : 'border-[#ffc45c] bg-gradient-to-b from-[#1b2b45] to-[#101827] shadow-[0_8px_25px_rgba(0,0,0,0.3)]'
+            state.nextMult === 8
+              ? 'border-[#ef4444] bg-gradient-to-b from-[#450a0a] to-[#1c0a12] shadow-[0_0_28px_rgba(239,68,68,0.45)] animate-[badgeBlink_0.8s_ease-in-out_infinite]'
+              : state.isNextPlay
+                ? 'border-[#35df91] bg-gradient-to-b from-[#173b3a] to-[#101d2b] shadow-[0_0_25px_rgba(53,223,145,0.25)] animate-[badgeBlink_1s_ease-in-out_infinite]'
+                : 'border-[#ffc45c] bg-gradient-to-b from-[#1b2b45] to-[#101827] shadow-[0_8px_25px_rgba(0,0,0,0.3)]'
           }`}
         >
           <span
             className={`inline-flex items-center gap-1.5 px-4 py-1.5 rounded-full text-sm font-black tracking-wider mb-3 border ${
-              state.isNextPlay
-                ? 'bg-[#35df9128] text-[#35df91] border-[#35df91]'
-                : 'bg-[#ffc45c20] text-[#ffdf91] border-[#ffc45c]'
+              state.nextMult === 8
+                ? 'bg-[#ef444433] text-[#fca5a5] border-[#ef4444]'
+                : state.isNextPlay
+                  ? 'bg-[#35df9128] text-[#35df91] border-[#35df91]'
+                  : 'bg-[#ffc45c20] text-[#ffdf91] border-[#ffc45c]'
             }`}
           >
             {state.isNextPlay && <Play className="w-3.5 h-3.5" />}
-            {state.isNextPlay ? 'PLAY NOW' : 'BASE MODE'}
+            {state.nextMult === 8 ? '🚨 8X ALERT — PLAY NOW 🚨' : state.isNextPlay ? 'PLAY NOW' : 'BASE MODE'}
           </span>
           <div className="grid grid-cols-3 gap-2 bg-[#080d18a8] border border-white/10 rounded-xl py-3 px-1">
             <NextItem label="MODE">
-              <span className={`text-[15px] font-black ${state.isNextPlay ? 'text-[#55c7ff]' : 'text-[#ffdf91]'}`}>
+              <span className={`text-[15px] font-black ${state.nextMult === 8 ? 'text-[#f87171]' : state.isNextPlay ? 'text-[#55c7ff]' : 'text-[#ffdf91]'}`}>
                 {state.isNextPlay ? 'PLAY NOW' : 'BASE BET'}
               </span>
             </NextItem>
@@ -223,7 +242,9 @@ export default function Dashboard({
               <span className="text-3xl font-black text-[#35df91] leading-none">{state.nextPettan}</span>
             </NextItem>
             <NextItem label="BET">
-              <span className="text-lg font-black text-[#ffdf91]">BET {state.nextMult}x</span>
+              <span className={`text-lg font-black ${state.nextMult === 8 ? 'text-[#f87171]' : 'text-[#ffdf91]'}`}>
+                BET {state.nextMult}x
+              </span>
             </NextItem>
           </div>
           <div className="mt-2.5 text-[10px] text-[#9baac2] font-semibold">
