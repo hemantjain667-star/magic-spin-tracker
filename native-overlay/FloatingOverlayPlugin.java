@@ -22,7 +22,7 @@ import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.ActivityCallback;
 import com.getcapacitor.annotation.CapacitorPlugin;
 
-import org.json.JSONArray;
+import java.util.List;
 
 @CapacitorPlugin(name = "FloatingOverlay")
 public class FloatingOverlayPlugin extends Plugin {
@@ -204,23 +204,13 @@ public class FloatingOverlayPlugin extends Plugin {
 
     @PluginMethod
     public void drainPendingSpins(PluginCall call) {
-        SharedPreferences prefs = getContext().getSharedPreferences(
-                FloatingOverlayService.PREFS_NAME, Context.MODE_PRIVATE);
-        String raw = prefs.getString(FloatingOverlayService.KEY_PENDING_SPINS, "[]");
-        prefs.edit().putString(FloatingOverlayService.KEY_PENDING_SPINS, "[]").apply();
-
+        List<Integer> pending = FloatingOverlayService.drainPendingSpinsSync(getContext());
         JSArray jsSpins = new JSArray();
-        try {
-            JSONArray arr = new JSONArray(raw);
-            for (int i = 0; i < arr.length(); i++) {
-                int n = arr.optInt(i, -1);
-                if (n >= 0 && n <= 36) {
-                    jsSpins.put(n);
-                }
+        for (Integer n : pending) {
+            if (n != null && n >= 0 && n <= 36) {
+                jsSpins.put(n);
             }
-        } catch (Exception ignored) {
         }
-
         JSObject res = new JSObject();
         res.put("spins", jsSpins);
         call.resolve(res);
