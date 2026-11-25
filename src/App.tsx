@@ -5,7 +5,12 @@ import {
   savePatterns,
   type PatternMap,
 } from './lib/game';
-import { playMelody, setSoundEnabled } from './lib/sound';
+import {
+  playMelody,
+  setSoundEnabled,
+  startPoliceSiren,
+  stopPoliceSiren,
+} from './lib/sound';
 import { vibrate } from './lib/haptics';
 import Dashboard from './components/Dashboard';
 import PatternEditorModal from './components/PatternEditorModal';
@@ -32,6 +37,7 @@ export default function App() {
   const [soundOn, setSoundOn] = useState(true);
   const [pinned, setPinned] = useState(false);
   const [isCapturing, setIsCapturing] = useState(false);
+  const [sirenActive, setSirenActive] = useState(false);
   const [showPatternEditor, setShowPatternEditor] = useState(false);
 
   const spinsRef = useRef<number[]>(spins);
@@ -42,6 +48,24 @@ export default function App() {
 
   const soundOnRef = useRef<boolean>(soundOn);
   soundOnRef.current = soundOn;
+
+  const triggerSiren = useCallback(() => {
+    setSirenActive(true);
+    vibrate([200, 100, 200, 100, 300]);
+    if (isAndroidNative()) {
+      FloatingOverlay.startSiren().catch(() => {});
+    } else {
+      startPoliceSiren();
+    }
+  }, []);
+
+  const handleStopSiren = useCallback(() => {
+    setSirenActive(false);
+    stopPoliceSiren();
+    if (isAndroidNative()) {
+      FloatingOverlay.stopSiren().catch(() => {});
+    }
+  }, []);
 
   useEffect(() => {
     try {
@@ -68,25 +92,33 @@ export default function App() {
     }).catch(() => {});
   }, [spins, patterns]);
 
-  const applySpinNumbers = useCallback((nums: number[]) => {
-    const valid = nums.filter((n) => Number.isInteger(n) && n >= 0 && n <= 36);
-    if (!valid.length) return;
+  const applySpinNumbers = useCallback(
+    (nums: number[], fromNative = false) => {
+      const valid = nums.filter((n) => Number.isInteger(n) && n >= 0 && n <= 36);
+      if (!valid.length) return;
 
-    const nextSpins = [...spinsRef.current, ...valid];
-    spinsRef.current = nextSpins;
-    setSpins(nextSpins);
+      const prevState = calculateRecords(spinsRef.current, patternsRef.current);
+      const nextSpins = [...spinsRef.current, ...valid];
+      spinsRef.current = nextSpins;
+      setSpins(nextSpins);
 
-    try {
-      const state = calculateRecords(nextSpins, patternsRef.current);
-      const last = state.records[state.records.length - 1];
-      if (last) {
-        if (soundOnRef.current) playMelody(last.statusType);
-        vibrate(last.statusType === 'HIT' ? [80, 50, 120] : 40);
+      try {
+        const nextState = calculateRecords(nextSpins, patternsRef.current);
+        const last = nextState.records[nextState.records.length - 1];
+
+        // Trigger Police Siren ONLY when entering 8X
+        if (!fromNative && prevState.nextMult !== 8 && nextState.nextMult === 8) {
+          triggerSiren();
+        } else if (last) {
+          if (soundOnRef.current) playMelody(last.statusType);
+          vibrate(last.statusType === 'HIT' ? [80, 50, 120] : 40);
+        }
+      } catch {
+        // Ignore audio/haptics errors
       }
-    } catch {
-      // Ignore audio/haptics errors
-    }
-  }, []);
+    },
+    [triggerSiren]
+  );
 
   const applySingleSpin = useCallback(
     (num: number) => {
@@ -94,28 +126,40 @@ export default function App() {
         alert('0 se 36 ke beech number dalein.');
         return;
       }
-      applySpinNumbers([num]);
+      applySpinNumbers([num], false);
     },
     [applySpinNumbers]
   );
+
+  const syncNativeSirenStatus = useCallback(async () => {
+    if (!isAndroidNative()) return;
+    try {
+      const { playing } = await FloatingOverlay.getSirenState();
+      setSirenActive(Boolean(playing));
+    } catch {
+      // Ignore
+    }
+  }, []);
 
   const drainNativeQueue = useCallback(async () => {
     if (!isAndroidNative()) return;
     try {
       const { spins: pending } = await FloatingOverlay.drainPendingSpins();
       if (Array.isArray(pending) && pending.length > 0) {
-        applySpinNumbers(pending);
+        applySpinNumbers(pending, true);
       }
     } catch {
       // Ignore
     }
-  }, [applySpinNumbers]);
+    syncNativeSirenStatus();
+  }, [applySpinNumbers, syncNativeSirenStatus]);
 
   useEffect(() => {
     drainNativeQueue();
 
     let spinHandle: { remove: () => Promise<void> } | undefined;
     let captureHandle: { remove: () => Promise<void> } | undefined;
+    let sirenHandle: { remove: () => Promise<void> } | undefined;
 
     if (isAndroidNative()) {
       FloatingOverlay.addListener('spinNumberSubmitted', () => {
@@ -129,6 +173,12 @@ export default function App() {
         if (capturing) setPinned(true);
       }).then((h) => {
         captureHandle = h;
+      });
+
+      FloatingOverlay.addListener('sirenStatusChanged', ({ playing }) => {
+        setSirenActive(Boolean(playing));
+      }).then((h) => {
+        sirenHandle = h;
       });
     }
 
@@ -146,6 +196,8 @@ export default function App() {
       window.removeEventListener('focus', drainNativeQueue);
       spinHandle?.remove();
       captureHandle?.remove();
+      sirenHandle?.remove();
+      stopPoliceSiren();
     };
   }, [drainNativeQueue]);
 
@@ -214,6 +266,7 @@ export default function App() {
     if (!confirm('Kya aap poori spin history reset karna chahte hain?')) return;
     spinsRef.current = [];
     setSpins([]);
+    handleStopSiren();
     try {
       localStorage.removeItem(STORAGE_KEY);
     } catch {
@@ -229,6 +282,7 @@ export default function App() {
         soundOn={soundOn}
         isPinned={pinned}
         isCapturing={isCapturing}
+        sirenActive={sirenActive}
         onToggleSound={() => {
           setSoundOn((s) => {
             const next = !s;
@@ -244,6 +298,7 @@ export default function App() {
         onToggleCapture={handleToggleCapture}
         onToggleTargetBox={handleToggleTargetBox}
         onOpenPatternEditor={() => setShowPatternEditor(true)}
+        onStopSiren={handleStopSiren}
       />
 
       {pinned && !isAndroidNative() && (
