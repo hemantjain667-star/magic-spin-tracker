@@ -39,12 +39,11 @@ jobs:
             npx cap add android
           fi
 
-      - name: Copy Native Overlay + OCR Java files & Patch Android Config
+      - name: Copy Native Java files & Patch Android Config
         run: |
           PKG_DIR="android/app/src/main/java/com/hemantjain/magicspintracker"
           mkdir -p "$PKG_DIR"
-          cp native-overlay/FloatingOverlayPlugin.java "$PKG_DIR/"
-          cp native-overlay/FloatingOverlayService.java "$PKG_DIR/"
+          cp native-overlay/*.java "$PKG_DIR/"
 
           printf 'package com.hemantjain.magicspintracker;\n\nimport android.os.Bundle;\nimport com.getcapacitor.BridgeActivity;\n\npublic class MainActivity extends BridgeActivity {\n    @Override\n    public void onCreate(Bundle savedInstanceState) {\n        registerPlugin(FloatingOverlayPlugin.class);\n        super.onCreate(savedInstanceState);\n    }\n}\n' > "$PKG_DIR/MainActivity.java"
 
@@ -90,6 +89,12 @@ jobs:
               const serviceXml = `        <service\n            android:name=".FloatingOverlayService"\n            android:enabled="true"\n            android:exported="false"\n            android:foregroundServiceType="mediaProjection|specialUse">\n            <property\n                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"\n                android:value="Floating roulette spin tracker overlay" />\n        </service>\n`;
               manifest = manifest.replace("</application>", serviceXml + "    </application>");
             }
+
+            if (!manifest.includes("ReminderReceiver")) {
+              const receiverXml = `        <receiver\n            android:name=".ReminderReceiver"\n            android:exported="false" />\n`;
+              manifest = manifest.replace("</application>", receiverXml + "    </application>");
+            }
+
             fs.writeFileSync(manifestPath, manifest, "utf8");
           '
 
