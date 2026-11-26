@@ -12,6 +12,17 @@ const HINDI_MELODY_MISS = [
   { f: 440, d: 0.16 },
   { f: 392, d: 0.24 },
 ];
+const PROFIT_CHIME = [
+  { f: 523.25, d: 0.12 },
+  { f: 659.25, d: 0.12 },
+  { f: 783.99, d: 0.14 },
+  { f: 1046.5, d: 0.28 },
+];
+const STOPLOSS_CHIME = [
+  { f: 440, d: 0.18 },
+  { f: 349.23, d: 0.18 },
+  { f: 293.66, d: 0.3 },
+];
 
 let audioCtx: AudioContext | null = null;
 let enabled = true;
@@ -82,8 +93,12 @@ export function playMelody(type: 'HIT' | 'MISS') {
   playNotes(type === 'HIT' ? HINDI_MELODY_HIT : HINDI_MELODY_MISS, 'triangle', 0.18);
 }
 
+export function playGoalChime(isProfit: boolean) {
+  playNotes(isProfit ? PROFIT_CHIME : STOPLOSS_CHIME, 'triangle', 0.24);
+}
+
 export function startPoliceSiren() {
-  if (sirenOsc) return;
+  stopPoliceSiren();
   const ctx = getCtx();
   if (!ctx) return;
   try {
@@ -95,14 +110,11 @@ export function startPoliceSiren() {
 
     osc.type = 'sawtooth';
     osc.frequency.setValueAtTime(1015, ctx.currentTime);
-
     lfo.type = 'sine';
     lfo.frequency.setValueAtTime(0.85, ctx.currentTime);
     lfoGain.gain.setValueAtTime(365, ctx.currentTime);
-
     filter.type = 'lowpass';
     filter.frequency.setValueAtTime(2200, ctx.currentTime);
-
     masterGain.gain.setValueAtTime(0.28, ctx.currentTime);
 
     lfo.connect(lfoGain);
@@ -110,36 +122,56 @@ export function startPoliceSiren() {
     osc.connect(filter);
     filter.connect(masterGain);
     masterGain.connect(ctx.destination);
-
     osc.start();
     lfo.start();
-
     sirenOsc = osc;
     sirenLfo = lfo;
     sirenGain = masterGain;
   } catch {
-    // Ignore audio errors
+    // Ignore
+  }
+}
+
+export function startWarning32xSiren() {
+  stopPoliceSiren();
+  const ctx = getCtx();
+  if (!ctx) return;
+  try {
+    const osc = ctx.createOscillator();
+    const lfo = ctx.createOscillator();
+    const lfoGain = ctx.createGain();
+    const filter = ctx.createBiquadFilter();
+    const masterGain = ctx.createGain();
+
+    // Distinct deep two-tone emergency horn for 32X (2nd time)
+    osc.type = 'square';
+    osc.frequency.setValueAtTime(490, ctx.currentTime);
+    lfo.type = 'square';
+    lfo.frequency.setValueAtTime(1.4, ctx.currentTime);
+    lfoGain.gain.setValueAtTime(95, ctx.currentTime);
+    filter.type = 'lowpass';
+    filter.frequency.setValueAtTime(1400, ctx.currentTime);
+    masterGain.gain.setValueAtTime(0.26, ctx.currentTime);
+
+    lfo.connect(lfoGain);
+    lfoGain.connect(osc.frequency);
+    osc.connect(filter);
+    filter.connect(masterGain);
+    masterGain.connect(ctx.destination);
+    osc.start();
+    lfo.start();
+    sirenOsc = osc;
+    sirenLfo = lfo;
+    sirenGain = masterGain;
+  } catch {
+    // Ignore
   }
 }
 
 export function stopPoliceSiren() {
-  try {
-    sirenOsc?.stop();
-    sirenOsc?.disconnect();
-  } catch {
-    // Ignore
-  }
-  try {
-    sirenLfo?.stop();
-    sirenLfo?.disconnect();
-  } catch {
-    // Ignore
-  }
-  try {
-    sirenGain?.disconnect();
-  } catch {
-    // Ignore
-  }
+  try { sirenOsc?.stop(); sirenOsc?.disconnect(); } catch {}
+  try { sirenLfo?.stop(); sirenLfo?.disconnect(); } catch {}
+  try { sirenGain?.disconnect(); } catch {}
   sirenOsc = null;
   sirenLfo = null;
   sirenGain = null;
