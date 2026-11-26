@@ -48,9 +48,11 @@ public class FloatingOverlayService extends Service {
 
     private static final String CHANNEL_ID = "magic_spin_overlay_channel";
     private static final int NOTIF_ID = 4109;
-    private static final long OCR_INTERVAL_MS = 550L;
-    private static final long DIFF_COOLDOWN_MS = 3500L;
-    private static final long REPEAT_COOLDOWN_MS = 11000L;
+    private static final long OCR_INTERVAL_MS = 700L;      // 0.7s per check
+    private static final long MIN_SPIN_GAP_MS = 12000L;    // 12s strict lock after ANY spin (prevents double!)
+    private static final long REPEAT_COOLDOWN_MS = 18000L; // 18s min for popup auto-repeat
+    private static final int REPEAT_BLANK_FRAMES = 10;     // ~7s continuous empty box required for auto-repeat
+    private static final int STABLE_FRAMES_NEEDED = 3;     // 3 steady matching frames (~2.1s)
     private static final int COL_NONE = 0, COL_RED = 1, COL_BLACK = 2, COL_GREEN = 3;
 
     private static final Object QUEUE_LOCK = new Object();
@@ -162,8 +164,8 @@ public class FloatingOverlayService extends Service {
     private final AtomicBoolean ocrBusy = new AtomicBoolean(false);
 
     private Integer candNum = null, lastOcrNum = null, selNum = null;
-    private int stableCnt = 0, blankCnt = 0, baseLum = -1;
-    private boolean sawBlinkOrGap = false;
+    private int stableCnt = 0, blankCnt = 0;
+    private boolean sawLongBlank = false;
     private long lastSubMs = 0L;
     private int curPat = 1, curMult = 1, curUnit = 0;
     private boolean curPlay = false;
@@ -275,8 +277,8 @@ public class FloatingOverlayService extends Service {
         }, capHandler);
         DisplayMetrics dm = realMetrics();
         setupDisplay(dm.widthPixels, dm.heightPixels, dm.densityDpi);
-        capturing = true; autoScan = true; ocrStatus = "NO BADGE";
-        candNum = null; stableCnt = 0; blankCnt = 0; sawBlinkOrGap = false; baseLum = -1;
+        capturing = true; autoScan = true; ocrStatus = "READY";
+        candNum = null; stableCnt = 0; blankCnt = 0; sawLongBlank = false;
         sendCapBroadcast(); updateUI(); tickOcr();
         Toast.makeText(this, "Box ko Red/Green/Black number par rakh kar LOCK BOX dabayein!", Toast.LENGTH_LONG).show();
     }
@@ -310,6 +312,16 @@ public class FloatingOverlayService extends Service {
 
     private void runOcrFrame() {
         if (proj == null || !boxVisible || boxSW <= 0 || boxSH <= 0) return;
+
+        // Hard 12-second spin lock: NEVER scan or double-add right after a spin!
+        long elapsed = System.currentTimeMillis() - lastSubMs;
+        if (lastOcrNum != null && elapsed < MIN_SPIN_GAP_MS) {
+            final long remSec = (MIN_SPIN_GAP_MS - elapsed + 999L) / 1000L;
+            candNum = null; stableCnt = 0;
+            uiHandler.post(() -> { ocrStatus = "WAIT " + remSec + "s (" + lastOcrNum + ")"; updateUI(); });
+            return;
+        }
+
         DisplayMetrics dm = realMetrics();
         if (dm.widthPixels != capW || dm.heightPixels != capH) { setupDisplay(dm.widthPixels, dm.heightPixels, dm.densityDpi); return; }
         if (reader == null) return;
@@ -334,7 +346,6 @@ public class FloatingOverlayService extends Service {
             Bitmap crop = Bitmap.createBitmap(full, cx, cy, cw, ch);
             full.recycle();
 
-            // Update mini live preview in expanded panel so user sees EXACT cropped box
             final Bitmap miniPrev = Bitmap.createScaledBitmap(crop, 72, 52, true);
             uiHandler.post(() -> {
                 if (previewImg != null) previewImg.setImageBitmap(miniPrev);
@@ -342,14 +353,10 @@ public class FloatingOverlayService extends Service {
                 lastPreviewBmp = miniPrev;
             });
 
-            // Detect badge color (RED / BLACK / GREEN) & average brightness (for blink detection)
-            int[] colStats = analyzeBadge(crop);
-            final int badgeCol = colStats[0];
-            final int avgLum = colStats[1];
-
+            final int badgeCol = detectBadgeColor(crop);
             if (badgeCol == COL_NONE) {
                 crop.recycle();
-                uiHandler.post(() -> onOcrResult(null, COL_NONE, avgLum));
+                uiHandler.post(() -> onOcrResult(null, COL_NONE));
                 return;
             }
 
@@ -360,14 +367,18 @@ public class FloatingOverlayService extends Service {
             ocr.process(InputImage.fromBitmap(padBmp, 0)).addOnSuccessListener(vt -> {
                 Integer d1 = parseNumForColor(vt.getText(), badgeCol);
                 if (d1 != null) {
-                    padBmp.recycle(); ocrBusy.set(false);
-                    uiHandler.post(() -> onOcrResult(d1, badgeCol, avgLum));
+                    padBmp.recycle();
+                    uiHandler.post(() -> { onOcrResult(d1, badgeCol); ocrBusy.set(false); });
                 } else {
                     Bitmap bwBmp = toHighContrast(padBmp);
                     padBmp.recycle();
                     ocr.process(InputImage.fromBitmap(bwBmp, 0))
-                            .addOnSuccessListener(vt2 -> uiHandler.post(() -> onOcrResult(parseNumForColor(vt2.getText(), badgeCol), badgeCol, avgLum)))
-                            .addOnCompleteListener(t -> { bwBmp.recycle(); ocrBusy.set(false); });
+                            .addOnSuccessListener(vt2 -> {
+                                Integer d2 = parseNumForColor(vt2.getText(), badgeCol);
+                                uiHandler.post(() -> { onOcrResult(d2, badgeCol); ocrBusy.set(false); });
+                            })
+                            .addOnFailureListener(e2 -> ocrBusy.set(false))
+                            .addOnCompleteListener(t -> bwBmp.recycle());
                 }
             }).addOnFailureListener(e -> { padBmp.recycle(); ocrBusy.set(false); });
         } catch (Exception e) {
@@ -376,93 +387,78 @@ public class FloatingOverlayService extends Service {
         }
     }
 
-    // Returns [badgeColor, avgLuminance]
-    private int[] analyzeBadge(Bitmap bmp) {
-        int w = bmp.getWidth(), h = bmp.getHeight();
-        int red = 0, grn = 0, blk = 0, bgTotal = 0, allCnt = 0;
-        long lumSum = 0;
+    private int detectBadgeColor(Bitmap bmp) {
+        int w = bmp.getWidth(), h = bmp.getHeight(), red = 0, grn = 0, blk = 0, bgTotal = 0;
         float[] hsv = new float[3];
         int step = Math.max(1, Math.min(w, h) / 24);
         for (int y = 0; y < h; y += step) {
             for (int x = 0; x < w; x += step) {
                 int c = bmp.getPixel(x, y);
-                int l = lum(c);
-                lumSum += l; allCnt++;
                 Color.RGBToHSV(Color.red(c), Color.green(c), Color.blue(c), hsv);
-                float hue = hsv[0], sat = hsv[1], val = hsv[2];
-                // Skip bright white/light-grey digit pixels when voting for badge color
-                if (val > 0.72f && sat < 0.28f) continue;
+                if (hsv[2] > 0.72f && hsv[1] < 0.28f) continue; // Ignore white digit text
                 bgTotal++;
-                if ((hue <= 20f || hue >= 335f) && sat >= 0.35f && val >= 0.22f) red++;
-                else if (hue >= 85f && hue <= 165f && sat >= 0.30f && val >= 0.18f) grn++;
-                else if (val <= 0.35f && sat <= 0.50f) blk++;
+                if ((hsv[0] <= 20f || hsv[0] >= 335f) && hsv[1] >= 0.35f && hsv[2] >= 0.22f) red++;
+                else if (hsv[0] >= 85f && hsv[0] <= 165f && hsv[1] >= 0.30f && hsv[2] >= 0.18f) grn++;
+                else if (hsv[2] <= 0.35f && hsv[1] <= 0.50f) blk++;
             }
         }
-        int avgL = allCnt > 0 ? (int) (lumSum / allCnt) : 0;
-        if (bgTotal < 12) return new int[]{COL_NONE, avgL};
+        if (bgTotal < 12) return COL_NONE;
         int rPct = (red * 100) / bgTotal, gPct = (grn * 100) / bgTotal, bPct = (blk * 100) / bgTotal;
-        int col = COL_NONE;
-        if (rPct >= 26 && rPct >= gPct) col = COL_RED;
-        else if (gPct >= 22 && gPct > rPct) col = COL_GREEN;
-        else if (bPct >= 34) col = COL_BLACK;
-        return new int[]{col, avgL};
+        if (rPct >= 26 && rPct >= gPct) return COL_RED;
+        if (gPct >= 22 && gPct > rPct) return COL_GREEN;
+        if (bPct >= 34) return COL_BLACK;
+        return COL_NONE;
     }
 
     private Integer parseNumForColor(String raw, int badgeCol) {
         if (raw == null || badgeCol == COL_NONE) return null;
         String s = raw.replace("\n", " ").trim();
-        if (s.isEmpty() || s.length() > 3) return null;
-        if (s.matches(".*[:.,$%xX₹].*")) return null;
+        if (s.isEmpty() || s.length() > 3 || s.matches(".*[:.,$%xX₹].*")) return null;
         s = s.replace(" ", "");
         if (badgeCol == COL_GREEN) {
-            if (s.equals("0") || s.equalsIgnoreCase("O") || s.equalsIgnoreCase("D") || s.equalsIgnoreCase("Q")) return 0;
-            return null; // ONLY 0 is allowed on GREEN!
+            return (s.equals("0") || s.equalsIgnoreCase("O") || s.equalsIgnoreCase("D") || s.equalsIgnoreCase("Q")) ? 0 : null;
         }
         s = s.replace('O', '0').replace('o', '0').replace('I', '1').replace('l', '1').replace('|', '1');
-        if (!s.matches("^[0-9]{1,2}$")) return null;
-        if (s.length() == 2 && s.startsWith("0")) return null;
+        if (!s.matches("^[0-9]{1,2}$") || (s.length() == 2 && s.startsWith("0"))) return null;
         int v = Integer.parseInt(s);
         if (v < 1 || v > 36) return null;
-        if (badgeCol == COL_RED && !isRed(v)) return null;   // Reject black number on RED badge!
-        if (badgeCol == COL_BLACK && isRed(v)) return null;  // Reject red number on BLACK badge!
+        if (badgeCol == COL_RED && !isRed(v)) return null;
+        if (badgeCol == COL_BLACK && isRed(v)) return null;
         return v;
     }
 
     private String colTag(int col) { return col == COL_RED ? "RED" : (col == COL_BLACK ? "BLK" : (col == COL_GREEN ? "GRN" : "---")); }
 
-    private void onOcrResult(Integer det, int col, int avgLum) {
+    private void onOcrResult(Integer det, int col) {
         if (!autoScan) return;
         long now = System.currentTimeMillis();
         long elapsed = now - lastSubMs;
 
-        // Detect color/brightness blink after cooldown (new spin flash!)
-        if (baseLum >= 0 && elapsed >= 6000L && Math.abs(avgLum - baseLum) >= 26) {
-            sawBlinkOrGap = true;
-        }
+        if (lastOcrNum != null && elapsed < MIN_SPIN_GAP_MS) return;
+
         if (det == null) {
             candNum = null; stableCnt = 0; blankCnt++;
-            if (blankCnt >= 3) sawBlinkOrGap = true;
+            if (blankCnt >= REPEAT_BLANK_FRAMES) sawLongBlank = true;
             ocrStatus = colTag(col) + ": --"; updateUI(); return;
         }
         blankCnt = 0;
+
+        // Same number already added & box never stayed empty for 7s -> STRICT HOLD (zero double!)
+        if (lastOcrNum != null && lastOcrNum.equals(det) && (!sawLongBlank || elapsed < REPEAT_COOLDOWN_MS)) {
+            candNum = null; stableCnt = 0;
+            ocrStatus = colTag(col) + " HOLD:" + det;
+            updateUI(); return;
+        }
+
         if (candNum != null && candNum.equals(det)) stableCnt++; else { candNum = det; stableCnt = 1; }
 
-        if (stableCnt >= 2) {
-            boolean isFirst = (lastOcrNum == null);
-            boolean isDiff = (lastOcrNum != null) && !lastOcrNum.equals(det) && elapsed >= DIFF_COOLDOWN_MS;
-            boolean isBlinkRepeat = (lastOcrNum != null) && lastOcrNum.equals(det) && sawBlinkOrGap && elapsed >= REPEAT_COOLDOWN_MS;
-
-            if (isFirst || isDiff || isBlinkRepeat) {
-                lastOcrNum = det; lastSubMs = now; sawBlinkOrGap = false; baseLum = avgLum;
-                ocrStatus = colTag(col) + " ADD:" + det;
-                submitSpin(det, "ocr"); return;
-            }
-            if (baseLum < 0) baseLum = avgLum;
-            else baseLum = (baseLum * 3 + avgLum) / 4; // Smooth baseline tracking
-            ocrStatus = colTag(col) + " HOLD:" + det;
-        } else {
-            ocrStatus = colTag(col) + " CHK:" + det;
+        if (stableCnt >= STABLE_FRAMES_NEEDED) {
+            candNum = null; stableCnt = 0;
+            ocrStatus = colTag(col) + " ADD:" + det;
+            submitSpin(det, "ocr");
+            return;
         }
+        ocrStatus = colTag(col) + " " + det + " (" + stableCnt + "/" + STABLE_FRAMES_NEEDED + ")";
         updateUI();
     }
 
@@ -497,7 +493,7 @@ public class FloatingOverlayService extends Service {
 
     private void submitSpin(int num, String src) {
         if (num < 0 || num > 36) return;
-        lastOcrNum = num; lastSubMs = System.currentTimeMillis(); sawBlinkOrGap = false;
+        lastOcrNum = num; lastSubMs = System.currentTimeMillis(); sawLongBlank = false; blankCnt = 0; candNum = null; stableCnt = 0;
         appendPendingSpinSync(this, num);
         int prevM = curMult;
         recalcNative();
@@ -663,7 +659,6 @@ public class FloatingOverlayService extends Service {
         LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(-1, dp(32)); tlp.bottomMargin = dp(3); top.setLayoutParams(tlp);
         Button col = mkBtn("-", "#334155", "#475569", dp(26), dp(28)); col.setOnClickListener(v -> setExpanded(false));
 
-        // Live mini preview of what Green Box is actually reading!
         previewImg = new ImageView(this);
         previewImg.setScaleType(ImageView.ScaleType.FIT_CENTER);
         previewImg.setBackground(bg("#000000", "#22C55E", 1, 4));
@@ -690,7 +685,7 @@ public class FloatingOverlayService extends Service {
         LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(0, dp(26), 1f); slp.rightMargin = dp(3); scanBtn.setLayoutParams(slp);
         scanBtn.setOnClickListener(v -> {
             if (!capturing) { Toast.makeText(this, "App se START AUTO CAPTURE dabayein", Toast.LENGTH_SHORT).show(); return; }
-            autoScan = !autoScan; ocrStatus = autoScan ? "NO BADGE" : "PAUSED"; sendCapBroadcast(); updateUI();
+            autoScan = !autoScan; ocrStatus = autoScan ? "READY" : "PAUSED"; sendCapBroadcast(); updateUI();
         });
         lockBtn = mkBtn("LOCK BOX", "#334155", "#475569", 0, dp(26));
         lockBtn.setLayoutParams(new LinearLayout.LayoutParams(0, dp(26), 1f));
