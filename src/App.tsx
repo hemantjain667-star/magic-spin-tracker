@@ -6,18 +6,38 @@ import {
   type PatternMap,
 } from './lib/game';
 import {
+  playGoalChime,
   playMelody,
   setSoundEnabled,
   startPoliceSiren,
+  startWarning32xSiren,
   stopPoliceSiren,
 } from './lib/sound';
 import { vibrate } from './lib/haptics';
 import Dashboard from './components/Dashboard';
+import LockScreen, { getStoredPin } from './components/LockScreen';
 import PatternEditorModal from './components/PatternEditorModal';
 import PinWidget from './components/PinWidget';
-import { FloatingOverlay, isAndroidNative } from './native/floatingOverlay';
+import WelcomeModal from './components/WelcomeModal';
+import {
+  FloatingOverlay,
+  isAndroidNative,
+  type SirenType,
+} from './native/floatingOverlay';
 
 const STORAGE_KEY = 'magic_spin_tracker_spins_v1';
+const PIN_LOCK_KEY = 'magic_pin_lock_enabled_v1';
+const TARGET_PROFIT_KEY = 'magic_target_profit_v1';
+const STOP_LOSS_KEY = 'magic_stop_loss_v1';
+
+function readNumStorage(key: string): number {
+  try {
+    const v = parseInt(localStorage.getItem(key) || '0', 10);
+    return Number.isFinite(v) && v > 0 ? v : 0;
+  } catch {
+    return 0;
+  }
+}
 
 export default function App() {
   const [spins, setSpins] = useState<number[]>(() => {
@@ -34,35 +54,61 @@ export default function App() {
   });
 
   const [patterns, setPatterns] = useState<PatternMap>(() => loadPatterns());
+  const [pinLockEnabled, setPinLockEnabled] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(PIN_LOCK_KEY) === '1';
+    } catch {
+      return false;
+    }
+  });
+  const [unlocked, setUnlocked] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(PIN_LOCK_KEY) !== '1';
+    } catch {
+      return true;
+    }
+  });
+  const [showWelcome, setShowWelcome] = useState<boolean>(true);
+  const [targetProfit, setTargetProfit] = useState<number>(() => readNumStorage(TARGET_PROFIT_KEY));
+  const [stopLoss, setStopLoss] = useState<number>(() => readNumStorage(STOP_LOSS_KEY));
+  const [goalAlert, setGoalAlert] = useState<'profit' | 'stoploss' | null>(null);
+
   const [soundOn, setSoundOn] = useState(true);
   const [pinned, setPinned] = useState(false);
   const [isCapturing, setIsCapturing] = useState(false);
   const [sirenActive, setSirenActive] = useState(false);
+  const [sirenType, setSirenType] = useState<SirenType>('none');
   const [showPatternEditor, setShowPatternEditor] = useState(false);
 
   const spinsRef = useRef<number[]>(spins);
   spinsRef.current = spins;
-
   const patternsRef = useRef<PatternMap>(patterns);
   patternsRef.current = patterns;
-
   const soundOnRef = useRef<boolean>(soundOn);
   soundOnRef.current = soundOn;
-
+  const targetRef = useRef<number>(targetProfit);
+  targetRef.current = targetProfit;
+  const stopLossRef = useRef<number>(stopLoss);
+  stopLossRef.current = stopLoss;
+  const goalFiredRef = useRef<'profit' | 'stoploss' | null>(null);
   const drainingRef = useRef<boolean>(false);
 
-  const triggerSiren = useCallback(() => {
+  const triggerSiren = useCallback((type: '8x' | '32x') => {
     setSirenActive(true);
-    vibrate([200, 100, 200, 100, 300]);
+    setSirenType(type);
+    vibrate(type === '32x' ? [300, 120, 300, 120, 400] : [200, 100, 200, 100, 300]);
     if (isAndroidNative()) {
-      FloatingOverlay.startSiren().catch(() => {});
+      if (type === '32x') FloatingOverlay.startSiren32x().catch(() => {});
+      else FloatingOverlay.startSiren().catch(() => {});
     } else {
-      startPoliceSiren();
+      if (type === '32x') startWarning32xSiren();
+      else startPoliceSiren();
     }
   }, []);
 
   const handleStopSiren = useCallback(() => {
     setSirenActive(false);
+    setSirenType('none');
     stopPoliceSiren();
     if (isAndroidNative()) {
       FloatingOverlay.stopSiren().catch(() => {});
@@ -73,13 +119,21 @@ export default function App() {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(spins));
     } catch {
-      // Ignore quota errors
+      // Ignore
     }
   }, [spins]);
 
   useEffect(() => {
-    if (!isAndroidNative()) return;
+    try {
+      localStorage.setItem(TARGET_PROFIT_KEY, String(targetProfit));
+      localStorage.setItem(STOP_LOSS_KEY, String(stopLoss));
+    } catch {
+      // Ignore
+    }
+  }, [targetProfit, stopLoss]);
 
+  useEffect(() => {
+    if (!isAndroidNative()) return;
     const state = calculateRecords(spins, patterns);
     FloatingOverlay.syncState({
       pattern: state.nextPettan,
@@ -91,34 +145,75 @@ export default function App() {
       lastSpin: spins.length ? spins[spins.length - 1] : -1,
       spinsJson: JSON.stringify(spins),
       patternsJson: JSON.stringify(patterns),
+      targetProfit,
+      stopLoss,
     }).catch(() => {});
-  }, [spins, patterns]);
+  }, [spins, patterns, targetProfit, stopLoss]);
 
-  const applySpinNumbers = useCallback(
-    (nums: number[], fromNative = false) => {
+  const checkGoals = useCallback((totalUnit: number) => {
+    const tp = targetRef.current;
+    const sl = stopLossRef.current;
+    if (tp > 0 && totalUnit >= tp) {
+      if (goalFiredRef.current !== 'profit') {
+        goalFiredRef.current = 'profit';
+        setGoalAlert('profit');
+        if (soundOnRef.current) playGoalChime(true);
+        vibrate([120, 80, 120, 80, 200]);
+      }
+    } else if (sl > 0 && totalUnit <= -sl) {
+      if (goalFiredRef.current !== 'stoploss') {
+        goalFiredRef.current = 'stoploss';
+        setGoalAlert('stoploss');
+        if (soundOnRef.current) playGoalChime(false);
+        vibrate([250, 100, 250]);
+      }
+    } else {
+      goalFiredRef.current = null;
+    }
+  }, []);
+
+  const applyPendingChanges = useCallback(
+    (nums: number[], undoCount = 0, fromNative = false) => {
       const valid = nums.filter((n) => Number.isInteger(n) && n >= 0 && n <= 36);
-      if (!valid.length) return;
+      if (!valid.length && undoCount <= 0) return;
 
       const prevState = calculateRecords(spinsRef.current, patternsRef.current);
-      const nextSpins = [...spinsRef.current, ...valid];
+      let base = spinsRef.current;
+      if (undoCount > 0) {
+        base = base.slice(0, Math.max(0, base.length - undoCount));
+      }
+      const nextSpins = valid.length ? [...base, ...valid] : base;
       spinsRef.current = nextSpins;
       setSpins(nextSpins);
 
       try {
         const nextState = calculateRecords(nextSpins, patternsRef.current);
-        const last = nextState.records[nextState.records.length - 1];
+        checkGoals(nextState.totalUnit);
 
-        if (!fromNative && prevState.nextMult !== 8 && nextState.nextMult === 8) {
-          triggerSiren();
-        } else if (last) {
-          if (soundOnRef.current) playMelody(last.statusType);
-          vibrate(last.statusType === 'HIT' ? [80, 50, 120] : 40);
+        if (valid.length && !fromNative) {
+          const entering32xSecond =
+            nextState.nextMult === 32 &&
+            nextState.nextStepsRem === 1 &&
+            !(prevState.nextMult === 32 && prevState.nextStepsRem === 1);
+          const entering8x = prevState.nextMult !== 8 && nextState.nextMult === 8;
+
+          if (entering32xSecond) {
+            triggerSiren('32x');
+          } else if (entering8x) {
+            triggerSiren('8x');
+          } else {
+            const last = nextState.records[nextState.records.length - 1];
+            if (last) {
+              if (soundOnRef.current) playMelody(last.statusType);
+              vibrate(last.statusType === 'HIT' ? [80, 50, 120] : 40);
+            }
+          }
         }
       } catch {
-        // Ignore audio/haptics errors
+        // Ignore
       }
     },
-    [triggerSiren]
+    [checkGoals, triggerSiren]
   );
 
   const applySingleSpin = useCallback(
@@ -127,16 +222,17 @@ export default function App() {
         alert('0 se 36 ke beech number dalein.');
         return;
       }
-      applySpinNumbers([num], false);
+      applyPendingChanges([num], 0, false);
     },
-    [applySpinNumbers]
+    [applyPendingChanges]
   );
 
   const syncNativeSirenStatus = useCallback(async () => {
     if (!isAndroidNative()) return;
     try {
-      const { playing } = await FloatingOverlay.getSirenState();
+      const { playing, type } = await FloatingOverlay.getSirenState();
       setSirenActive(Boolean(playing));
+      setSirenType(playing ? type || '8x' : 'none');
     } catch {
       // Ignore
     }
@@ -146,9 +242,11 @@ export default function App() {
     if (!isAndroidNative() || drainingRef.current) return;
     drainingRef.current = true;
     try {
-      const { spins: pending } = await FloatingOverlay.drainPendingSpins();
-      if (Array.isArray(pending) && pending.length > 0) {
-        applySpinNumbers(pending, true);
+      const { spins: pending, undoCount } = await FloatingOverlay.drainPendingActions();
+      const safeSpins = Array.isArray(pending) ? pending : [];
+      const safeUndo = typeof undoCount === 'number' && undoCount > 0 ? undoCount : 0;
+      if (safeSpins.length > 0 || safeUndo > 0) {
+        applyPendingChanges(safeSpins, safeUndo, true);
       }
     } catch {
       // Ignore
@@ -156,47 +254,42 @@ export default function App() {
       drainingRef.current = false;
     }
     syncNativeSirenStatus();
-  }, [applySpinNumbers, syncNativeSirenStatus]);
+  }, [applyPendingChanges, syncNativeSirenStatus]);
 
   useEffect(() => {
     drainNativeQueue();
 
     let spinHandle: { remove: () => Promise<void> } | undefined;
+    let undoHandle: { remove: () => Promise<void> } | undefined;
     let captureHandle: { remove: () => Promise<void> } | undefined;
     let sirenHandle: { remove: () => Promise<void> } | undefined;
 
     if (isAndroidNative()) {
-      FloatingOverlay.addListener('spinNumberSubmitted', () => {
-        drainNativeQueue();
-      }).then((h) => {
+      FloatingOverlay.addListener('spinNumberSubmitted', () => drainNativeQueue()).then((h) => {
         spinHandle = h;
       });
-
+      FloatingOverlay.addListener('undoRequested', () => drainNativeQueue()).then((h) => {
+        undoHandle = h;
+      });
       FloatingOverlay.addListener('captureStatusChanged', ({ capturing }) => {
         setIsCapturing(Boolean(capturing));
         if (capturing) setPinned(true);
       }).then((h) => {
         captureHandle = h;
       });
-
-      FloatingOverlay.addListener('sirenStatusChanged', ({ playing }) => {
+      FloatingOverlay.addListener('sirenStatusChanged', ({ playing, type }) => {
         setSirenActive(Boolean(playing));
+        setSirenType(playing ? type || '8x' : 'none');
       }).then((h) => {
         sirenHandle = h;
       });
     }
 
     const onResume = () => {
-      if (document.visibilityState === 'visible') {
-        drainNativeQueue();
-      }
+      if (document.visibilityState === 'visible') drainNativeQueue();
     };
-
-    // Safety poll while app is visible so zero background spins are ever missed
     const pollTimer = window.setInterval(() => {
-      if (document.visibilityState === 'visible') {
-        drainNativeQueue();
-      }
+      if (document.visibilityState === 'visible') drainNativeQueue();
     }, 1500);
 
     document.addEventListener('visibilitychange', onResume);
@@ -207,11 +300,28 @@ export default function App() {
       document.removeEventListener('visibilitychange', onResume);
       window.removeEventListener('focus', drainNativeQueue);
       spinHandle?.remove();
+      undoHandle?.remove();
       captureHandle?.remove();
       sirenHandle?.remove();
       stopPoliceSiren();
     };
   }, [drainNativeQueue]);
+
+  const handleTogglePinLock = () => {
+    if (!pinLockEnabled) {
+      try { localStorage.setItem(PIN_LOCK_KEY, '1'); } catch {}
+      setPinLockEnabled(true);
+      if (!getStoredPin()) {
+        setUnlocked(false);
+      } else {
+        alert('4-Digit App PIN Lock ON ho gaya hai!');
+      }
+    } else {
+      try { localStorage.setItem(PIN_LOCK_KEY, '0'); } catch {}
+      setPinLockEnabled(false);
+      alert('App PIN Lock OFF kar diya gaya hai.');
+    }
+  };
 
   const handlePinToggle = async () => {
     if (!pinned) {
@@ -238,7 +348,6 @@ export default function App() {
       alert('Auto Screen Capture sirf Android APK mein kaam karta hai.');
       return;
     }
-
     if (!isCapturing) {
       const { granted } = await FloatingOverlay.checkPermission();
       if (!granted) {
@@ -272,19 +381,22 @@ export default function App() {
     const nextSpins = spinsRef.current.slice(0, -1);
     spinsRef.current = nextSpins;
     setSpins(nextSpins);
+    goalFiredRef.current = null;
   };
 
   const resetAll = () => {
     if (!confirm('Kya aap poori spin history reset karna chahte hain?')) return;
     spinsRef.current = [];
     setSpins([]);
+    setGoalAlert(null);
+    goalFiredRef.current = null;
     handleStopSiren();
-    try {
-      localStorage.removeItem(STORAGE_KEY);
-    } catch {
-      // Ignore
-    }
+    try { localStorage.removeItem(STORAGE_KEY); } catch {}
   };
+
+  if (pinLockEnabled && !unlocked) {
+    return <LockScreen onUnlock={() => setUnlocked(true)} />;
+  }
 
   return (
     <>
@@ -295,6 +407,11 @@ export default function App() {
         isPinned={pinned}
         isCapturing={isCapturing}
         sirenActive={sirenActive}
+        sirenType={sirenType}
+        pinLockEnabled={pinLockEnabled}
+        targetProfit={targetProfit}
+        stopLoss={stopLoss}
+        goalAlert={goalAlert}
         onToggleSound={() => {
           setSoundOn((s) => {
             const next = !s;
@@ -302,6 +419,10 @@ export default function App() {
             return next;
           });
         }}
+        onTogglePinLock={handleTogglePinLock}
+        onChangeTargetProfit={setTargetProfit}
+        onChangeStopLoss={setStopLoss}
+        onDismissGoalAlert={() => setGoalAlert(null)}
         onAddSpin={applySingleSpin}
         onUndo={undoSpin}
         onReset={resetAll}
@@ -313,9 +434,12 @@ export default function App() {
         onStopSiren={handleStopSiren}
       />
 
+      {showWelcome && <WelcomeModal onClose={() => setShowWelcome(false)} />}
+
       {pinned && !isAndroidNative() && (
         <PinWidget
           spins={spins}
+          patterns={patterns}
           soundOn={soundOn}
           onAddSpin={applySingleSpin}
           onUnpin={handlePinToggle}
