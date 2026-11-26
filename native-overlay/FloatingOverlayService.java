@@ -130,11 +130,11 @@ public class FloatingOverlayService extends Service {
     private TextView pillHead, pillInfo, pillOcr, expInfo, selText;
     private final TextView[] l5Views = new TextView[5];
     private final List<Integer> l5Nums = new ArrayList<>();
-    private Button scanBtn, lockBtn, sirenBtn;
+    private Button scanBtn, lockBtn, voiceBtn, sirenBtn;
     private ImageView previewImg;
     private Bitmap lastPrevBmp = null;
     private TextToSpeech tts;
-    private boolean ttsReady = false;
+    private boolean ttsReady = false, voiceOn = true;
 
     private volatile int boxSX = 0, boxSY = 0, boxSW = 0, boxSH = 0;
     private boolean boxVis = false, boxLock = false, capOn = false, autoScan = false;
@@ -186,7 +186,7 @@ public class FloatingOverlayService extends Service {
     }
 
     private void speakNumberOnly(int num) {
-        if (tts != null && ttsReady) {
+        if (voiceOn && tts != null && ttsReady) {
             try { tts.speak(String.valueOf(num), TextToSpeech.QUEUE_FLUSH, null, "n_" + num); } catch (Exception ignored) {}
         }
     }
@@ -209,6 +209,7 @@ public class FloatingOverlayService extends Service {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) { stopSelf(); return START_NOT_STICKY; }
         SharedPreferences p = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
         curPat = p.getInt("pattern", 1); curMult = p.getInt("multiplier", 1); curPlay = p.getBoolean("isPlaying", false); curUnit = p.getInt("totalUnit", 0);
+        voiceOn = p.getBoolean("voiceOn", true);
         loadLast5();
         if (ACTION_START_CAPTURE.equals(a) && i != null) {
             startFg(true); if (root == null) mkOvl(); if (!boxVis) mkBox();
@@ -434,7 +435,7 @@ public class FloatingOverlayService extends Service {
         appendPendingSpinSync(this, num);
         int pm = curMult; recalc();
         if (pm != 8 && curMult == 8) startPoliceSiren(this);
-        else speakNumberOnly(num); // Speak ONLY the scanned number!
+        else speakNumberOnly(num);
         loadLast5(); updateUI();
         sendBroadcast(new Intent(ACTION_NUMBER_SUBMITTED).setPackage(getPackageName()).putExtra(EXTRA_NUMBER, num).putExtra(EXTRA_SOURCE, src));
         Toast.makeText(this, ("ocr".equals(src) ? "Auto: " : "Spin: ") + num + " -> " + curPat + "P | " + curMult + "X", Toast.LENGTH_SHORT).show();
@@ -572,12 +573,24 @@ public class FloatingOverlayService extends Service {
 
         LinearLayout row = new LinearLayout(this); row.setOrientation(LinearLayout.HORIZONTAL);
         LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(-1, dp(26)); rlp.bottomMargin = dp(3); row.setLayoutParams(rlp);
-        scanBtn = mkBtn("AUTO: OFF", "#334155", "#475569", 0, dp(26));
-        LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(0, dp(26), 1f); slp.rightMargin = dp(3); scanBtn.setLayoutParams(slp);
+        scanBtn = mkBtn("AUTO", "#334155", "#475569", 0, dp(26)); scanBtn.setTextSize(8.5f);
+        LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(0, dp(26), 1f); slp.rightMargin = dp(2); scanBtn.setLayoutParams(slp);
         scanBtn.setOnClickListener(v -> { if (!capOn) { Toast.makeText(this, "App se START AUTO CAPTURE dabayein", Toast.LENGTH_SHORT).show(); return; } autoScan = !autoScan; ocrTxt = autoScan ? "READY" : "PAUSED"; bcastCap(); updateUI(); });
-        lockBtn = mkBtn("LOCK BOX", "#334155", "#475569", 0, dp(26)); lockBtn.setLayoutParams(new LinearLayout.LayoutParams(0, dp(26), 1f));
+
+        lockBtn = mkBtn("LOCK", "#334155", "#475569", 0, dp(26)); lockBtn.setTextSize(8.5f);
+        LinearLayout.LayoutParams llp = new LinearLayout.LayoutParams(0, dp(26), 1f); llp.rightMargin = dp(2); lockBtn.setLayoutParams(llp);
         lockBtn.setOnClickListener(v -> { if (!boxVis) mkBox(); else toggleLock(); });
-        row.addView(scanBtn); row.addView(lockBtn); p.addView(row);
+
+        voiceBtn = mkBtn("VOX:ON", "#15803D", "#22C55E", 0, dp(26)); voiceBtn.setTextSize(8.5f);
+        voiceBtn.setLayoutParams(new LinearLayout.LayoutParams(0, dp(26), 1f));
+        voiceBtn.setOnClickListener(v -> {
+            voiceOn = !voiceOn;
+            getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit().putBoolean("voiceOn", voiceOn).apply();
+            if (!voiceOn && tts != null) { try { tts.stop(); } catch (Exception ignored) {} }
+            updateUI();
+            Toast.makeText(this, voiceOn ? "Number Voice ON" : "Number Voice OFF", Toast.LENGTH_SHORT).show();
+        });
+        row.addView(scanBtn); row.addView(lockBtn); row.addView(voiceBtn); p.addView(row);
 
         expInfo = mkTxt(10.5f); expInfo.setTextColor(Color.parseColor("#F8FAFC")); expInfo.setBackground(bg("#1E293B", "#334155", 1, 6));
         LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(-1, dp(26)); ilp.bottomMargin = dp(3); expInfo.setLayoutParams(ilp); p.addView(expInfo);
@@ -619,8 +632,9 @@ public class FloatingOverlayService extends Service {
         }
         if (sirenBtn != null) sirenBtn.setVisibility(sir ? View.VISIBLE : View.GONE);
         if (expInfo != null) expInfo.setText(ocrTxt + " | " + info + " | U:" + u);
-        if (scanBtn != null) { scanBtn.setText(autoScan ? "AUTO: ON" : "AUTO: OFF"); scanBtn.setBackground(bg(autoScan ? "#15803D" : "#334155", autoScan ? "#22C55E" : "#475569", 1, 5)); }
-        if (lockBtn != null) { lockBtn.setText(boxLock ? "UNLOCK BOX" : "LOCK BOX"); lockBtn.setBackground(bg(boxLock ? "#0369A1" : "#334155", boxLock ? "#38BDF8" : "#475569", 1, 5)); }
+        if (scanBtn != null) { scanBtn.setText(autoScan ? "AUTO:ON" : "AUTO:OFF"); scanBtn.setBackground(bg(autoScan ? "#15803D" : "#334155", autoScan ? "#22C55E" : "#475569", 1, 5)); }
+        if (lockBtn != null) { lockBtn.setText(boxLock ? "UNLOCK" : "LOCK"); lockBtn.setBackground(bg(boxLock ? "#0369A1" : "#334155", boxLock ? "#38BDF8" : "#475569", 1, 5)); }
+        if (voiceBtn != null) { voiceBtn.setText(voiceOn ? "VOX:ON" : "VOX:OFF"); voiceBtn.setBackground(bg(voiceOn ? "#15803D" : "#334155", voiceOn ? "#22C55E" : "#475569", 1, 5)); }
     }
 
     private void setExp(boolean ex) {
