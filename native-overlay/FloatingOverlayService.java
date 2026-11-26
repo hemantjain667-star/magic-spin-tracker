@@ -48,10 +48,10 @@ public class FloatingOverlayService extends Service {
 
     private static final String CHANNEL_ID = "magic_spin_overlay_channel";
     private static final int NOTIF_ID = 4109;
-    private static final long OCR_INTERVAL_MS = 700L;      // 0.7s per scan
-    private static final long MIN_SPIN_GAP_MS = 22000L;    // 22s strict lock (30-40s roulette round!)
-    private static final int STABLE_FRAMES_NEEDED = 2;     // 2 steady matching frames (~1.4s)
-    private static final int REPEAT_BLANK_FRAMES = 8;      // ~5.6s empty popup for auto-repeat
+    private static final long OCR_INTERVAL_MS = 500L;      // Fast 0.5s scan (~1.0s instant capture!)
+    private static final long MIN_SPIN_GAP_MS = 22000L;    // 22s lock (30-40s roulette round)
+    private static final int STABLE_FRAMES_NEEDED = 2;     // 2 steady matching frames (~1.0s)
+    private static final int REPEAT_BLANK_FRAMES = 10;     // ~5s empty popup for auto-repeat
     private static final int COL_NONE = 0, COL_RED = 1, COL_BLACK = 2, COL_GREEN = 3;
 
     private static final Object QUEUE_LOCK = new Object();
@@ -303,7 +303,6 @@ public class FloatingOverlayService extends Service {
         if (!capturing || capHandler == null) return;
         capHandler.postDelayed(() -> {
             if (!capturing) return;
-            // Watchdog: never allow ocrBusy to deadlock > 4s
             if (ocrBusy.get() && (System.currentTimeMillis() - ocrStartMs > 4000L)) ocrBusy.set(false);
             if (autoScan && boxVisible && !ocrBusy.get()) {
                 uiHandler.post(this::updateBoxCoordsOnUi);
@@ -316,7 +315,6 @@ public class FloatingOverlayService extends Service {
     private void runOcrFrame() {
         if (proj == null || !boxVisible || boxSW <= 0 || boxSH <= 0) return;
 
-        // Hard 22-second lock after ANY spin (matches 30-40s Auto Roulette round!)
         long elapsed = System.currentTimeMillis() - lastSubMs;
         if (lastOcrNum != null && elapsed < MIN_SPIN_GAP_MS) {
             final long remSec = (MIN_SPIN_GAP_MS - elapsed + 999L) / 1000L;
@@ -346,7 +344,6 @@ public class FloatingOverlayService extends Service {
             int cw = Math.max(4, Math.min(iw - cx, Math.round((boxSW - ins * 2) * sx)));
             int ch = Math.max(4, Math.min(ih - cy, Math.round((boxSH - ins * 2) * sy)));
 
-            // Also check Slot #2 badge color (just to the right) for repeat detection after 22s!
             int s2x = cx + cw + Math.max(4, cw / 5);
             int slot2Col = COL_NONE;
             if (s2x + cw < iw) {
@@ -373,9 +370,18 @@ public class FloatingOverlayService extends Service {
                 return;
             }
 
-            // Pass 1: Border-erased pure Black-on-White digits (eliminates white Evolution outline!)
-            final boolean[] thinOneHint = new boolean[]{false};
-            final Bitmap cleanBw = extractWhiteDigitsClean(crop, thinOneHint);
+            // digitHints[0] = thinOneHint (for Red "1"), digitHints[1] = hasDigitPixels (for Green "0"!)
+            final boolean[] digitHints = new boolean[]{false, false};
+            final Bitmap cleanBw = extractWhiteDigitsClean(crop, digitHints);
+
+            // GREEN badge with white digit inside = 100% GUARANTEED 0 (only 0 is green in Roulette!)
+            if (badgeCol == COL_GREEN && digitHints[1]) {
+                cleanBw.recycle();
+                crop.recycle();
+                uiHandler.post(() -> onOcrResult(0, COL_GREEN, fSlot2Col));
+                return;
+            }
+
             final Bitmap rawPad = scaleAndPadColor(crop);
             crop.recycle();
 
@@ -388,11 +394,9 @@ public class FloatingOverlayService extends Service {
                     uiHandler.post(() -> { onOcrResult(d1, badgeCol, fSlot2Col); ocrBusy.set(false); });
                 } else {
                     cleanBw.recycle();
-                    // Pass 2: Raw color padded bitmap
                     ocr.process(InputImage.fromBitmap(rawPad, 0)).addOnSuccessListener(vt2 -> {
                         Integer d2 = parseNumForColor(vt2.getText(), badgeCol);
-                        // Fallback for thin single-digit "1" on RED badge (ML Kit often skips lone "1")
-                        if (d2 == null && badgeCol == COL_RED && thinOneHint[0]) d2 = 1;
+                        if (d2 == null && badgeCol == COL_RED && digitHints[0]) d2 = 1;
                         final Integer finalDet = d2;
                         uiHandler.post(() -> { onOcrResult(finalDet, badgeCol, fSlot2Col); ocrBusy.set(false); });
                     }).addOnFailureListener(e2 -> ocrBusy.set(false))
@@ -405,25 +409,17 @@ public class FloatingOverlayService extends Service {
         }
     }
 
-    // Extracts pure white roulette digits & flood-erases outer white highlight border!
-    private Bitmap extractWhiteDigitsClean(Bitmap src, boolean[] thinOneHint) {
+    private Bitmap extractWhiteDigitsClean(Bitmap src, boolean[] digitHints) {
         int w = src.getWidth(), h = src.getHeight();
         boolean[] mask = new boolean[w * h];
         float[] hsv = new float[3];
-        int whiteCount = 0;
         for (int y = 0; y < h; y++) {
             for (int x = 0; x < w; x++) {
                 int c = src.getPixel(x, y);
-                int r = Color.red(c), g = Color.green(c), b = Color.blue(c);
-                Color.RGBToHSV(r, g, b, hsv);
-                // White / bright silver digit pixels
-                if (hsv[2] >= 0.62f && hsv[1] <= 0.34f) {
-                    mask[y * w + x] = true;
-                    whiteCount++;
-                }
+                Color.RGBToHSV(Color.red(c), Color.green(c), Color.blue(c), hsv);
+                if (hsv[2] >= 0.62f && hsv[1] <= 0.34f) mask[y * w + x] = true;
             }
         }
-        // BFS flood-erase any white pixels connected to the 4 outer edges (removes Evolution's white outline!)
         boolean[] cleaned = mask.clone();
         int[] q = new int[w * h];
         int head = 0, tail = 0;
@@ -444,7 +440,6 @@ public class FloatingOverlayService extends Service {
             if (cy > 0 && cleaned[idx - w]) { cleaned[idx - w] = false; q[tail++] = idx - w; }
             if (cy + 1 < h && cleaned[idx + w]) { cleaned[idx + w] = false; q[tail++] = idx + w; }
         }
-        // Check remaining digit bounding box
         int minX = w, maxX = -1, minY = h, maxY = -1, rem = 0;
         for (int y = 0; y < h; y++) {
             for (int x = 0; x < w; x++) {
@@ -455,12 +450,12 @@ public class FloatingOverlayService extends Service {
                 }
             }
         }
-        // Fallback if digit touched edge and got erased
         boolean[] use = (rem >= 8) ? cleaned : mask;
         if (rem >= 8) {
+            digitHints[1] = true; // White digit clearly present inside badge!
             int dw = maxX - minX + 1, dh = maxY - minY + 1;
             if (dh >= Math.max(8, h / 3) && dw >= 2 && dw <= Math.round(dh * 0.45f)) {
-                thinOneHint[0] = true; // Single narrow vertical digit "1"
+                digitHints[0] = true; // Thin single digit "1"
             }
         }
         int[] px = new int[w * h];
@@ -483,7 +478,7 @@ public class FloatingOverlayService extends Service {
         float sc = Math.max(2.5f, Math.min(4f, 180f / sh));
         int tw = Math.min(400, Math.round(sw * sc)), th = Math.min(400, Math.round(sh * sc));
         Bitmap up = Bitmap.createScaledBitmap(s, tw, th, true);
-        int p = 28, bg = s.getPixel(sw / 4, sh / 4); // Sample inside badge, not white border!
+        int p = 28, bg = s.getPixel(sw / 4, sh / 4);
         Bitmap out = Bitmap.createBitmap(tw + p * 2, th + p * 2, Bitmap.Config.ARGB_8888);
         Canvas c = new Canvas(out); c.drawColor(bg); c.drawBitmap(up, p, p, null); up.recycle();
         return out;
@@ -493,7 +488,6 @@ public class FloatingOverlayService extends Service {
         int w = bmp.getWidth(), h = bmp.getHeight(), red = 0, grn = 0, blk = 0, bgTotal = 0;
         float[] hsv = new float[3];
         int step = Math.max(1, Math.min(w, h) / 24);
-        // Sample inner 80% so white border does not affect badge color
         int x0 = w / 10, x1 = w - x0, y0 = h / 10, y1 = h - y0;
         for (int y = y0; y < y1; y += step) {
             for (int x = x0; x < x1; x += step) {
@@ -501,15 +495,15 @@ public class FloatingOverlayService extends Service {
                 Color.RGBToHSV(Color.red(c), Color.green(c), Color.blue(c), hsv);
                 if (hsv[2] > 0.68f && hsv[1] < 0.30f) continue;
                 bgTotal++;
-                if ((hsv[0] <= 22f || hsv[0] >= 335f) && hsv[1] >= 0.35f && hsv[2] >= 0.22f) red++;
-                else if (hsv[0] >= 85f && hsv[0] <= 165f && hsv[1] >= 0.30f && hsv[2] >= 0.18f) grn++;
+                if ((hsv[0] <= 22f || hsv[0] >= 335f) && hsv[1] >= 0.35f && hsv[2] >= 0.20f) red++;
+                else if (hsv[0] >= 75f && hsv[0] <= 178f && hsv[1] >= 0.22f && hsv[2] >= 0.14f) grn++;
                 else if (hsv[2] <= 0.35f && hsv[1] <= 0.50f) blk++;
             }
         }
         if (bgTotal < 10) return COL_NONE;
         int rPct = (red * 100) / bgTotal, gPct = (grn * 100) / bgTotal, bPct = (blk * 100) / bgTotal;
+        if (gPct >= 18 && gPct > rPct) return COL_GREEN;
         if (rPct >= 26 && rPct >= gPct) return COL_RED;
-        if (gPct >= 22 && gPct > rPct) return COL_GREEN;
         if (bPct >= 34) return COL_BLACK;
         return COL_NONE;
     }
@@ -519,9 +513,7 @@ public class FloatingOverlayService extends Service {
         String s = raw.replace("\n", " ").trim();
         if (s.isEmpty() || s.length() > 3 || s.matches(".*[:.,$%xX₹].*")) return null;
         s = s.replace(" ", "");
-        if (badgeCol == COL_GREEN) {
-            return (s.equals("0") || s.equalsIgnoreCase("O") || s.equalsIgnoreCase("D") || s.equalsIgnoreCase("Q")) ? 0 : null;
-        }
+        if (badgeCol == COL_GREEN) return 0;
         s = s.replace('O', '0').replace('o', '0').replace('I', '1').replace('l', '1').replace('|', '1').replace('!', '1');
         if (!s.matches("^[0-9]{1,2}$") || (s.length() == 2 && s.startsWith("0"))) return null;
         int v = Integer.parseInt(s);
@@ -545,7 +537,6 @@ public class FloatingOverlayService extends Service {
         }
         blankCnt = 0;
 
-        // Same number repeat check (only after 22s lock: either popup vanished OR Slot #2 color shifted!)
         boolean slot2Shifted = (lastSlot2Col != COL_NONE && slot2Col != COL_NONE && slot2Col != lastSlot2Col);
         if (lastOcrNum != null && lastOcrNum.equals(det) && !sawLongBlank && !slot2Shifted) {
             candNum = null; stableCnt = 0;
