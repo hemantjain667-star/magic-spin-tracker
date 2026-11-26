@@ -14,24 +14,19 @@ export const DEFAULT_PETTAN_PATTERNS: PatternMap = {
 };
 
 export const PETTAN_PATTERNS = DEFAULT_PETTAN_PATTERNS;
-
 export const ALL_NUMS = Array.from({ length: 37 }, (_, i) => i);
 export const PATTERN_STORAGE_KEY = 'magic_spin_custom_patterns_v1';
 
 export function cloneDefaultPatterns(): PatternMap {
   const copy: PatternMap = {};
-  for (let d = 0; d <= 9; d++) {
-    copy[d] = [...DEFAULT_PETTAN_PATTERNS[d]];
-  }
+  for (let d = 0; d <= 9; d++) copy[d] = [...DEFAULT_PETTAN_PATTERNS[d]];
   return copy;
 }
 
 export function normalizePatternNumbers(nums: number[]): number[] {
   const unique = new Set<number>();
   for (const n of nums) {
-    if (Number.isInteger(n) && n >= 0 && n <= 36) {
-      unique.add(n);
-    }
+    if (Number.isInteger(n) && n >= 0 && n <= 36) unique.add(n);
   }
   return Array.from(unique);
 }
@@ -78,8 +73,18 @@ export interface SpinRecord {
   totalUnit: number;
 }
 
+export interface PatternStat {
+  pettan: number;
+  spins: number;
+  hits: number;
+  misses: number;
+  hitRate: number;
+  unit: number;
+}
+
 export interface GameState {
   records: SpinRecord[];
+  patternStats: PatternStat[];
   hits: number;
   misses: number;
   passCount: number;
@@ -89,6 +94,7 @@ export interface GameState {
   nextCutNumbers: number[];
   isNextPlay: boolean;
   nextMult: number;
+  nextStepsRem: number;
 }
 
 export function getCutPettanNumbers(
@@ -104,6 +110,9 @@ export function calculateRecords(
   patterns: PatternMap = DEFAULT_PETTAN_PATTERNS
 ): GameState {
   const records: SpinRecord[] = [];
+  const pMap: Record<number, { spins: number; hits: number; misses: number; unit: number }> = {};
+  for (let d = 0; d <= 9; d++) pMap[d] = { spins: 0, hits: 0, misses: 0, unit: 0 };
+
   let hits = 0;
   let misses = 0;
   let totalUnit = 0;
@@ -121,8 +130,13 @@ export function calculateRecords(
     const curMult = mult;
     const unit = (isHit ? 36 - cutCount : -cutCount) * curMult;
     totalUnit += unit;
-    let result = '';
 
+    pMap[pettan].spins++;
+    pMap[pettan].unit += unit;
+    if (isHit) pMap[pettan].hits++;
+    else pMap[pettan].misses++;
+
+    let result = '';
     if (isHit) {
       hits++;
       if (mult === 1) {
@@ -167,11 +181,25 @@ export function calculateRecords(
     });
   }
 
+  const order = [1, 2, 3, 4, 5, 6, 7, 8, 9, 0];
+  const patternStats: PatternStat[] = order.map((d) => {
+    const s = pMap[d];
+    return {
+      pettan: d,
+      spins: s.spins,
+      hits: s.hits,
+      misses: s.misses,
+      hitRate: s.spins > 0 ? Math.round((s.hits / s.spins) * 100) : 0,
+      unit: s.unit,
+    };
+  });
+
   const nextCounting = spinList.length ? baseCounting + spinList.length : 1;
   const nextPettan = nextCounting % 10;
 
   return {
     records,
+    patternStats,
     hits,
     misses,
     passCount: hits,
@@ -181,5 +209,6 @@ export function calculateRecords(
     nextCutNumbers: getCutPettanNumbers(nextPettan, patterns),
     isNextPlay: mult > 1,
     nextMult: mult,
+    nextStepsRem: stepsRem,
   };
 }
