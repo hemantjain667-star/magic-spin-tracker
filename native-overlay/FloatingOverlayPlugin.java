@@ -1,17 +1,20 @@
 package com.hemantjain.magicspintracker;
 
+import android.Manifest;
 import android.app.Activity;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.media.projection.MediaProjectionManager;
 import android.net.Uri;
 import android.os.Build;
 import android.provider.Settings;
 
 import androidx.activity.result.ActivityResult;
+import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
 import com.getcapacitor.JSArray;
@@ -31,12 +34,27 @@ public class FloatingOverlayPlugin extends Plugin {
 
     @Override
     public void load() {
+        ReminderReceiver.cancel(getContext());
+
+        // Request Android 13+ notification permission for 1-hour Best Wish reminder
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(getContext(), Manifest.permission.POST_NOTIFICATIONS)
+                    != PackageManager.PERMISSION_GRANTED && getActivity() != null) {
+                ActivityCompat.requestPermissions(
+                        getActivity(),
+                        new String[]{Manifest.permission.POST_NOTIFICATIONS},
+                        7011
+                );
+            }
+        }
+
         overlayReceiver = new BroadcastReceiver() {
             @Override
             public void onReceive(Context context, Intent intent) {
                 if (intent == null || intent.getAction() == null) return;
+                String act = intent.getAction();
 
-                if (FloatingOverlayService.ACTION_NUMBER_SUBMITTED.equals(intent.getAction())) {
+                if (FloatingOverlayService.ACTION_NUMBER_SUBMITTED.equals(act)) {
                     int num = intent.getIntExtra(FloatingOverlayService.EXTRA_NUMBER, -1);
                     String source = intent.getStringExtra(FloatingOverlayService.EXTRA_SOURCE);
                     if (num >= 0 && num <= 36) {
@@ -45,14 +63,18 @@ public class FloatingOverlayPlugin extends Plugin {
                         data.put("source", source != null ? source : "manual");
                         notifyListeners("spinNumberSubmitted", data);
                     }
-                } else if (FloatingOverlayService.ACTION_CAPTURE_STATUS.equals(intent.getAction())) {
+                } else if (FloatingOverlayService.ACTION_UNDO_REQUESTED.equals(act)) {
+                    notifyListeners("undoRequested", new JSObject());
+                } else if (FloatingOverlayService.ACTION_CAPTURE_STATUS.equals(act)) {
                     JSObject data = new JSObject();
                     data.put("capturing", intent.getBooleanExtra(FloatingOverlayService.EXTRA_CAPTURING, false));
                     data.put("scanning", intent.getBooleanExtra(FloatingOverlayService.EXTRA_SCANNING, false));
                     notifyListeners("captureStatusChanged", data);
-                } else if (FloatingOverlayService.ACTION_SIREN_STATUS.equals(intent.getAction())) {
+                } else if (FloatingOverlayService.ACTION_SIREN_STATUS.equals(act)) {
                     JSObject data = new JSObject();
                     data.put("playing", intent.getBooleanExtra(FloatingOverlayService.EXTRA_SIREN_PLAYING, false));
+                    String type = intent.getStringExtra(FloatingOverlayService.EXTRA_SIREN_TYPE);
+                    data.put("type", type != null ? type : SirenPlayer.TYPE_NONE);
                     notifyListeners("sirenStatusChanged", data);
                 }
             }
@@ -60,6 +82,7 @@ public class FloatingOverlayPlugin extends Plugin {
 
         IntentFilter filter = new IntentFilter();
         filter.addAction(FloatingOverlayService.ACTION_NUMBER_SUBMITTED);
+        filter.addAction(FloatingOverlayService.ACTION_UNDO_REQUESTED);
         filter.addAction(FloatingOverlayService.ACTION_CAPTURE_STATUS);
         filter.addAction(FloatingOverlayService.ACTION_SIREN_STATUS);
         ContextCompat.registerReceiver(
@@ -68,6 +91,18 @@ public class FloatingOverlayPlugin extends Plugin {
                 filter,
                 ContextCompat.RECEIVER_NOT_EXPORTED
         );
+    }
+
+    @Override
+    protected void handleOnResume() {
+        super.handleOnResume();
+        ReminderReceiver.cancel(getContext());
+    }
+
+    @Override
+    protected void handleOnStop() {
+        super.handleOnStop();
+        ReminderReceiver.scheduleOneHour(getContext());
     }
 
     @PluginMethod
@@ -122,29 +157,24 @@ public class FloatingOverlayPlugin extends Plugin {
             call.resolve(res);
             return;
         }
-
         MediaProjectionManager mpm = (MediaProjectionManager)
                 getContext().getSystemService(Context.MEDIA_PROJECTION_SERVICE);
         if (mpm == null) {
             call.reject("MediaProjectionManager unavailable");
             return;
         }
-
-        Intent captureIntent = mpm.createScreenCaptureIntent();
-        startActivityForResult(call, captureIntent, "handleScreenCaptureResult");
+        startActivityForResult(call, mpm.createScreenCaptureIntent(), "handleScreenCaptureResult");
     }
 
     @ActivityCallback
     private void handleScreenCaptureResult(PluginCall call, ActivityResult result) {
         if (call == null) return;
-
         if (result.getResultCode() == Activity.RESULT_OK && result.getData() != null) {
             Intent serviceIntent = new Intent(getContext(), FloatingOverlayService.class);
             serviceIntent.setAction(FloatingOverlayService.ACTION_START_CAPTURE);
             serviceIntent.putExtra(FloatingOverlayService.EXTRA_RESULT_CODE, result.getResultCode());
             serviceIntent.putExtra(FloatingOverlayService.EXTRA_RESULT_DATA, result.getData());
             ContextCompat.startForegroundService(getContext(), serviceIntent);
-
             JSObject res = new JSObject();
             res.put("started", true);
             call.resolve(res);
@@ -175,30 +205,38 @@ public class FloatingOverlayPlugin extends Plugin {
 
     @PluginMethod
     public void startSiren(PluginCall call) {
-        FloatingOverlayService.startPoliceSiren(getContext());
-        if (FloatingOverlayService.isRunning) {
-            Intent serviceIntent = new Intent(getContext(), FloatingOverlayService.class);
-            serviceIntent.setAction(FloatingOverlayService.ACTION_REFRESH_UI);
-            getContext().startService(serviceIntent);
-        }
+        SirenPlayer.start8x(getContext());
+        refreshOverlayUi();
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void startSiren32x(PluginCall call) {
+        SirenPlayer.start32x(getContext());
+        refreshOverlayUi();
         call.resolve();
     }
 
     @PluginMethod
     public void stopSiren(PluginCall call) {
-        FloatingOverlayService.stopPoliceSiren(getContext());
+        SirenPlayer.stop(getContext());
+        refreshOverlayUi();
+        call.resolve();
+    }
+
+    private void refreshOverlayUi() {
         if (FloatingOverlayService.isRunning) {
             Intent serviceIntent = new Intent(getContext(), FloatingOverlayService.class);
             serviceIntent.setAction(FloatingOverlayService.ACTION_REFRESH_UI);
             getContext().startService(serviceIntent);
         }
-        call.resolve();
     }
 
     @PluginMethod
     public void getSirenState(PluginCall call) {
         JSObject res = new JSObject();
-        res.put("playing", FloatingOverlayService.isSirenPlaying());
+        res.put("playing", SirenPlayer.isPlaying());
+        res.put("type", SirenPlayer.getActiveType());
         call.resolve(res);
     }
 
@@ -206,13 +244,20 @@ public class FloatingOverlayPlugin extends Plugin {
     public void drainPendingSpins(PluginCall call) {
         List<Integer> pending = FloatingOverlayService.drainPendingSpinsSync(getContext());
         JSArray jsSpins = new JSArray();
-        for (Integer n : pending) {
-            if (n != null && n >= 0 && n <= 36) {
-                jsSpins.put(n);
-            }
-        }
+        for (Integer n : pending) if (n != null && n >= 0 && n <= 36) jsSpins.put(n);
         JSObject res = new JSObject();
         res.put("spins", jsSpins);
+        call.resolve(res);
+    }
+
+    @PluginMethod
+    public void drainPendingActions(PluginCall call) {
+        FloatingOverlayService.PendingActions act = FloatingOverlayService.drainPendingActionsSync(getContext());
+        JSArray jsSpins = new JSArray();
+        for (Integer n : act.spins) if (n != null && n >= 0 && n <= 36) jsSpins.put(n);
+        JSObject res = new JSObject();
+        res.put("spins", jsSpins);
+        res.put("undoCount", act.undoCount);
         call.resolve(res);
     }
 
@@ -225,6 +270,8 @@ public class FloatingOverlayPlugin extends Plugin {
         int hits = call.getInt("hits", 0);
         int misses = call.getInt("misses", 0);
         int lastSpin = call.getInt("lastSpin", -1);
+        int targetProfit = Math.max(0, call.getInt("targetProfit", 0));
+        int stopLoss = Math.max(0, call.getInt("stopLoss", 0));
         String spinsJson = call.getString("spinsJson", "[]");
         String patternsJson = call.getString("patternsJson", "{}");
 
@@ -238,6 +285,8 @@ public class FloatingOverlayPlugin extends Plugin {
                 .putInt("hits", hits)
                 .putInt("misses", misses)
                 .putInt("lastSpin", lastSpin)
+                .putInt(FloatingOverlayService.KEY_TARGET_PROFIT, targetProfit)
+                .putInt(FloatingOverlayService.KEY_STOP_LOSS, stopLoss)
                 .putString(FloatingOverlayService.KEY_SPINS_JSON, spinsJson)
                 .putString(FloatingOverlayService.KEY_PATTERNS_JSON, patternsJson)
                 .apply();
@@ -262,11 +311,9 @@ public class FloatingOverlayPlugin extends Plugin {
 
     @Override
     protected void handleOnDestroy() {
+        ReminderReceiver.scheduleOneHour(getContext());
         if (overlayReceiver != null) {
-            try {
-                getContext().unregisterReceiver(overlayReceiver);
-            } catch (Exception ignored) {
-            }
+            try { getContext().unregisterReceiver(overlayReceiver); } catch (Exception ignored) {}
             overlayReceiver = null;
         }
     }
