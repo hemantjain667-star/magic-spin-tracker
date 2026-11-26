@@ -12,6 +12,7 @@ import android.os.Build;
 
 import androidx.core.app.NotificationCompat;
 
+import java.util.Calendar;
 import java.util.Random;
 
 public class ReminderReceiver extends BroadcastReceiver {
@@ -60,6 +61,11 @@ public class ReminderReceiver extends BroadcastReceiver {
     @Override
     public void onReceive(Context ctx, Intent intent) {
         if (ctx == null) return;
+
+        // Silent Mode: Raat 12:00 AM se Subah 11:00 AM tak koi notification/song nahi aayega!
+        int hour = Calendar.getInstance().get(Calendar.HOUR_OF_DAY);
+        if (hour < 11) return;
+
         try {
             NotificationManager nm = (NotificationManager) ctx.getSystemService(Context.NOTIFICATION_SERVICE);
             if (nm == null) return;
