@@ -81,6 +81,11 @@ jobs:
               manifest = manifest.replace("</manifest>", permXml + "</manifest>");
             }
 
+            if (!manifest.includes("android.intent.action.TTS_SERVICE")) {
+              const ttsQuery = `    <queries>\n        <intent>\n            <action android:name="android.intent.action.TTS_SERVICE" />\n        </intent>\n    </queries>\n`;
+              manifest = manifest.replace("</manifest>", ttsQuery + "</manifest>");
+            }
+
             if (!manifest.includes("FloatingOverlayService")) {
               const serviceXml = `        <service\n            android:name=".FloatingOverlayService"\n            android:enabled="true"\n            android:exported="false"\n            android:foregroundServiceType="mediaProjection|specialUse">\n            <property\n                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"\n                android:value="Floating roulette spin tracker overlay" />\n        </service>\n`;
               manifest = manifest.replace("</application>", serviceXml + "    </application>");
