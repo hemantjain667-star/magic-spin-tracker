@@ -49,7 +49,7 @@ public class FloatingOverlayService extends Service {
     public static final String KEY_TARGET_PROFIT = "target_profit_unit", KEY_STOP_LOSS = "stop_loss_unit";
 
     private static final String CH_ID = "magic_spin_overlay_channel";
-    private static final int NOTIF_ID = 4109, COL_NONE = 0, COL_RED = 1, COL_BLK = 2, COL_GRN = 3;
+    private static final int NOTIF_ID = 4109;
     private static final long OCR_MS = 500L, LOCK_MS = 22000L;
     private static final Object Q_LOCK = new Object();
 
@@ -83,8 +83,7 @@ public class FloatingOverlayService extends Service {
                 if (base.length() > 0) {
                     JSONArray nextB = new JSONArray();
                     for (int i = 0; i < base.length() - 1; i++) nextB.put(base.get(i));
-                    int uc = p.getInt(KEY_PENDING_UNDO, 0) + 1;
-                    p.edit().putString(KEY_SPINS_JSON, nextB.toString()).putInt(KEY_PENDING_UNDO, uc).commit();
+                    p.edit().putString(KEY_SPINS_JSON, nextB.toString()).putInt(KEY_PENDING_UNDO, p.getInt(KEY_PENDING_UNDO, 0) + 1).commit();
                     return true;
                 }
             } catch (Exception ignored) {}
@@ -110,20 +109,18 @@ public class FloatingOverlayService extends Service {
     private WindowManager wm;
     private WindowManager.LayoutParams params, boxParams;
     private FrameLayout root, scanBox;
-    private View resizeHandle;
+    private View resizeHandle, numPadView, grid36View;
     private LinearLayout pillView, expandedView;
     private TextView pillHead, pillInfo, pillOcr, expInfo, selText, msg32xTxt;
     private final TextView[] l5Views = new TextView[5];
     private final List<Integer> l5Nums = new ArrayList<>();
-    private Button scanBtn, lockBtn, voiceBtn, sirenBtn;
+    private Button scanBtn, lockBtn, voiceBtn, modeBtn, sirenBtn;
     private ImageView previewImg;
     private Bitmap lastPrevBmp = null;
     private TextToSpeech tts;
-    private boolean ttsReady = false, voiceOn = true, tpFired = false, slFired = false;
-
-    // Blink state: 0 = normal, 1 = HIT green, 2 = MISS red
-    private int blinkTone = 0;
-    private int blinkStepsLeft = 0;
+    private boolean ttsReady = false, voiceOn = true, tpFired = false, slFired = false, showGrid36 = false;
+    private String typedSpin = "";
+    private int blinkTone = 0, blinkStepsLeft = 0;
 
     private volatile int boxSX = 0, boxSY = 0, boxSW = 0, boxSH = 0;
     private boolean boxVis = false, boxLock = false, capOn = false, autoScan = false;
@@ -139,7 +136,7 @@ public class FloatingOverlayService extends Service {
     private volatile long ocrMs = 0L;
 
     private Integer cand = null, lastOcr = null, selNum = null;
-    private int stCnt = 0, blCnt = 0, lastS2Col = COL_NONE, curPat = 1, curMult = 1, curStepsRem = 0, curUnit = 0;
+    private int stCnt = 0, blCnt = 0, lastS2Col = OcrHelper.COL_NONE, curPat = 1, curMult = 1, curStepsRem = 0, curUnit = 0;
     private boolean longBlank = false, curPlay = false, lastSpinWasHit = false;
     private long lastSubMs = 0L;
     private String ocrTxt = "MANUAL";
@@ -174,23 +171,11 @@ public class FloatingOverlayService extends Service {
     }
 
     private void speakNum(int num) {
-        if (voiceOn && tts != null && ttsReady) {
-            try { tts.speak(String.valueOf(num), TextToSpeech.QUEUE_FLUSH, null, "n_" + num); } catch (Exception ignored) {}
-        }
+        if (voiceOn && tts != null && ttsReady) { try { tts.speak(String.valueOf(num), TextToSpeech.QUEUE_FLUSH, null, "n_" + num); } catch (Exception ignored) {} }
     }
 
-    private void startResultBlink(boolean isHit) {
-        blinkTone = isHit ? 1 : 2;
-        blinkStepsLeft = 6;
-        runBlinkStep();
-    }
-
-    private void runBlinkStep() {
-        updateUI();
-        if (blinkStepsLeft <= 0) { blinkTone = 0; updateUI(); return; }
-        blinkStepsLeft--;
-        uiHdl.postDelayed(this::runBlinkStep, 200L);
-    }
+    private void startResultBlink(boolean isHit) { blinkTone = isHit ? 1 : 2; blinkStepsLeft = 6; runBlinkStep(); }
+    private void runBlinkStep() { updateUI(); if (blinkStepsLeft <= 0) { blinkTone = 0; updateUI(); return; } blinkStepsLeft--; uiHdl.postDelayed(this::runBlinkStep, 200L); }
 
     @Override public IBinder onBind(Intent i) { return null; }
 
@@ -210,8 +195,7 @@ public class FloatingOverlayService extends Service {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) { stopSelf(); return START_NOT_STICKY; }
         SharedPreferences p = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
         curPat = p.getInt("pattern", 1); curMult = p.getInt("multiplier", 1); curPlay = p.getBoolean("isPlaying", false); curUnit = p.getInt("totalUnit", 0);
-        voiceOn = p.getBoolean("voiceOn", true);
-        recalc(); loadLast5();
+        voiceOn = p.getBoolean("voiceOn", true); recalc(); loadLast5();
         if (ACTION_START_CAPTURE.equals(a) && i != null) {
             startFg(true); if (root == null) mkOvl(); if (!boxVis) mkBox();
             Intent rd = i.getParcelableExtra(EXTRA_RESULT_DATA);
@@ -243,11 +227,7 @@ public class FloatingOverlayService extends Service {
         return list;
     }
 
-    private void loadLast5() {
-        List<Integer> all = allSpins(); l5Nums.clear();
-        for (int i = all.size() - 1; i >= 0 && l5Nums.size() < 5; i--) l5Nums.add(all.get(i));
-    }
-
+    private void loadLast5() { List<Integer> all = allSpins(); l5Nums.clear(); for (int i = all.size() - 1; i >= 0 && l5Nums.size() < 5; i--) l5Nums.add(all.get(i)); }
     private DisplayMetrics realDm() { DisplayMetrics d = new DisplayMetrics(); if (wm == null) wm = (WindowManager) getSystemService(WINDOW_SERVICE); wm.getDefaultDisplay().getRealMetrics(d); return d; }
     private void syncBoxXY() { if (scanBox == null) return; int[] l = new int[2]; scanBox.getLocationOnScreen(l); boxSX = l[0]; boxSY = l[1]; boxSW = scanBox.getWidth(); boxSH = scanBox.getHeight(); }
 
@@ -274,7 +254,7 @@ public class FloatingOverlayService extends Service {
         capTh = new HandlerThread("MagicOcr"); capTh.start(); capHdl = new Handler(capTh.getLooper());
         proj.registerCallback(new MediaProjection.Callback() { @Override public void onStop() { uiHdl.post(() -> { stopCap(); updateUI(); }); } }, capHdl);
         DisplayMetrics dm = realDm(); setDisp(dm.widthPixels, dm.heightPixels, dm.densityDpi);
-        capOn = true; autoScan = true; ocrTxt = "READY"; cand = null; stCnt = 0; blCnt = 0; longBlank = false; lastS2Col = COL_NONE; busy.set(false);
+        capOn = true; autoScan = true; ocrTxt = "READY"; cand = null; stCnt = 0; blCnt = 0; longBlank = false; lastS2Col = OcrHelper.COL_NONE; busy.set(false);
         bcastCap(); updateUI(); tick();
     }
 
@@ -322,31 +302,31 @@ public class FloatingOverlayService extends Service {
             int ins = dp(4), cx = Math.max(0, Math.min(iw - 4, Math.round((boxSX + ins) * sx))), cy = Math.max(0, Math.min(ih - 4, Math.round((boxSY + ins) * sy)));
             int cw = Math.max(4, Math.min(iw - cx, Math.round((boxSW - ins * 2) * sx))), ch = Math.max(4, Math.min(ih - cy, Math.round((boxSH - ins * 2) * sy)));
 
-            int s2x = cx + cw + Math.max(4, cw / 5), s2c = COL_NONE;
-            if (s2x + cw < iw) { Bitmap b2 = Bitmap.createBitmap(full, s2x, cy, cw, ch); s2c = badgeCol(b2); b2.recycle(); }
+            int s2x = cx + cw + Math.max(4, cw / 5), s2c = OcrHelper.COL_NONE;
+            if (s2x + cw < iw) { Bitmap b2 = Bitmap.createBitmap(full, s2x, cy, cw, ch); s2c = OcrHelper.badgeCol(b2); b2.recycle(); }
             final int fs2 = s2c;
             Bitmap crop = Bitmap.createBitmap(full, cx, cy, cw, ch); full.recycle();
 
             final Bitmap mp = Bitmap.createScaledBitmap(crop, 72, 52, true);
             uiHdl.post(() -> { if (previewImg != null) previewImg.setImageBitmap(mp); if (lastPrevBmp != null && !lastPrevBmp.isRecycled()) lastPrevBmp.recycle(); lastPrevBmp = mp; });
 
-            final int col = badgeCol(crop);
-            if (col == COL_NONE) { crop.recycle(); uiHdl.post(() -> onOcr(null, COL_NONE, fs2)); return; }
+            final int col = OcrHelper.badgeCol(crop);
+            if (col == OcrHelper.COL_NONE) { crop.recycle(); uiHdl.post(() -> onOcr(null, OcrHelper.COL_NONE, fs2)); return; }
 
             final boolean[] hints = new boolean[]{false, false};
-            final Bitmap bw = cleanWhiteDigits(crop, hints);
-            if (col == COL_GRN && hints[1]) { bw.recycle(); crop.recycle(); uiHdl.post(() -> onOcr(0, COL_GRN, fs2)); return; }
-            final Bitmap rp = padCol(crop); crop.recycle();
+            final Bitmap bw = OcrHelper.cleanWhiteDigits(crop, hints);
+            if (col == OcrHelper.COL_GRN && hints[1]) { bw.recycle(); crop.recycle(); uiHdl.post(() -> onOcr(0, OcrHelper.COL_GRN, fs2)); return; }
+            final Bitmap rp = OcrHelper.padCol(crop); crop.recycle();
 
             busy.set(true); ocrMs = System.currentTimeMillis();
             ocr.process(InputImage.fromBitmap(bw, 0)).addOnSuccessListener(v1 -> {
-                Integer d1 = parseNum(v1.getText(), col);
+                Integer d1 = OcrHelper.parseNum(v1.getText(), col);
                 if (d1 != null) { bw.recycle(); rp.recycle(); uiHdl.post(() -> { onOcr(d1, col, fs2); busy.set(false); }); }
                 else {
                     bw.recycle();
                     ocr.process(InputImage.fromBitmap(rp, 0)).addOnSuccessListener(v2 -> {
-                        Integer d2 = parseNum(v2.getText(), col);
-                        if (d2 == null && col == COL_RED && hints[0]) d2 = 1;
+                        Integer d2 = OcrHelper.parseNum(v2.getText(), col);
+                        if (d2 == null && col == OcrHelper.COL_RED && hints[0]) d2 = 1;
                         final Integer fd = d2; uiHdl.post(() -> { onOcr(fd, col, fs2); busy.set(false); });
                     }).addOnFailureListener(e -> busy.set(false)).addOnCompleteListener(t -> rp.recycle());
                 }
@@ -354,83 +334,16 @@ public class FloatingOverlayService extends Service {
         } catch (Exception e) { if (img != null) { try { img.close(); } catch (Exception ignored) {} } busy.set(false); }
     }
 
-    private Bitmap cleanWhiteDigits(Bitmap s, boolean[] hints) {
-        int w = s.getWidth(), h = s.getHeight(); boolean[] m = new boolean[w * h]; float[] hsv = new float[3];
-        for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) { int c = s.getPixel(x, y); Color.RGBToHSV(Color.red(c), Color.green(c), Color.blue(c), hsv); if (hsv[2] >= 0.62f && hsv[1] <= 0.34f) m[y * w + x] = true; }
-        boolean[] cl = m.clone(); int[] q = new int[w * h]; int hd = 0, tl = 0;
-        for (int x = 0; x < w; x++) { if (cl[x]) { cl[x] = false; q[tl++] = x; } int b = (h - 1) * w + x; if (cl[b]) { cl[b] = false; q[tl++] = b; } }
-        for (int y = 1; y < h - 1; y++) { int l = y * w, r = l + w - 1; if (cl[l]) { cl[l] = false; q[tl++] = l; } if (cl[r]) { cl[r] = false; q[tl++] = r; } }
-        while (hd < tl) {
-            int idx = q[hd++], cx = idx % w, cy = idx / w;
-            if (cx > 0 && cl[idx - 1]) { cl[idx - 1] = false; q[tl++] = idx - 1; }
-            if (cx + 1 < w && cl[idx + 1]) { cl[idx + 1] = false; q[tl++] = idx + 1; }
-            if (cy > 0 && cl[idx - w]) { cl[idx - w] = false; q[tl++] = idx - w; }
-            if (cy + 1 < h && cl[idx + w]) { cl[idx + w] = false; q[tl++] = idx + w; }
-        }
-        int mx0 = w, mx1 = -1, my0 = h, my1 = -1, rem = 0;
-        for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) if (cl[y * w + x]) { rem++; if (x < mx0) mx0 = x; if (x > mx1) mx1 = x; if (y < my0) my0 = y; if (y > my1) my1 = y; }
-        boolean[] use = rem >= 8 ? cl : m;
-        if (rem >= 8) { hints[1] = true; int dw = mx1 - mx0 + 1, dh = my1 - my0 + 1; if (dh >= Math.max(8, h / 3) && dw >= 2 && dw <= Math.round(dh * 0.45f)) hints[0] = true; }
-        int[] px = new int[w * h]; for (int i = 0; i < px.length; i++) px[i] = use[i] ? Color.BLACK : Color.WHITE;
-        Bitmap rb = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888); rb.setPixels(px, 0, w, 0, 0, w, h);
-        float sc = Math.max(3f, Math.min(5f, 200f / Math.max(1, h))); int tw = Math.min(440, Math.round(w * sc)), th = Math.min(440, Math.round(h * sc));
-        Bitmap up = Bitmap.createScaledBitmap(rb, tw, th, false); rb.recycle();
-        Bitmap out = Bitmap.createBitmap(tw + 72, th + 72, Bitmap.Config.ARGB_8888);
-        Canvas cv = new Canvas(out); cv.drawColor(Color.WHITE); cv.drawBitmap(up, 36, 36, null); up.recycle(); return out;
-    }
-
-    private Bitmap padCol(Bitmap s) {
-        int sw = Math.max(1, s.getWidth()), sh = Math.max(1, s.getHeight());
-        float sc = Math.max(2.5f, Math.min(4f, 180f / sh)); int tw = Math.min(400, Math.round(sw * sc)), th = Math.min(400, Math.round(sh * sc));
-        Bitmap up = Bitmap.createScaledBitmap(s, tw, th, true);
-        Bitmap out = Bitmap.createBitmap(tw + 56, th + 56, Bitmap.Config.ARGB_8888);
-        Canvas cv = new Canvas(out); cv.drawColor(s.getPixel(sw / 4, sh / 4)); cv.drawBitmap(up, 28, 28, null); up.recycle(); return out;
-    }
-
-    private int badgeCol(Bitmap b) {
-        int w = b.getWidth(), h = b.getHeight(), r = 0, g = 0, k = 0, t = 0, st = Math.max(1, Math.min(w, h) / 24);
-        float[] hsv = new float[3]; int x0 = w / 10, x1 = w - x0, y0 = h / 10, y1 = h - y0;
-        for (int y = y0; y < y1; y += st) for (int x = x0; x < x1; x += st) {
-            int c = b.getPixel(x, y); Color.RGBToHSV(Color.red(c), Color.green(c), Color.blue(c), hsv);
-            if (hsv[2] > 0.68f && hsv[1] < 0.30f) continue; t++;
-            if ((hsv[0] <= 22f || hsv[0] >= 335f) && hsv[1] >= 0.35f && hsv[2] >= 0.20f) r++;
-            else if (hsv[0] >= 75f && hsv[0] <= 178f && hsv[1] >= 0.22f && hsv[2] >= 0.14f) g++;
-            else if (hsv[2] <= 0.35f && hsv[1] <= 0.50f) k++;
-        }
-        if (t < 10) return COL_NONE;
-        int rp = r * 100 / t, gp = g * 100 / t, kp = k * 100 / t;
-        if (gp >= 18 && gp > rp) return COL_GRN;
-        if (rp >= 26 && rp >= gp) return COL_RED;
-        if (kp >= 34) return COL_BLK;
-        return COL_NONE;
-    }
-
-    private Integer parseNum(String raw, int col) {
-        if (raw == null || col == COL_NONE) return null;
-        String s = raw.replace("\n", " ").trim();
-        if (s.isEmpty() || s.length() > 3 || s.matches(".*[:.,$%xX₹].*")) return null;
-        if (col == COL_GRN) return 0;
-        s = s.replace(" ", "").replace('O', '0').replace('o', '0').replace('I', '1').replace('l', '1').replace('|', '1').replace('!', '1');
-        if (!s.matches("^[0-9]{1,2}$") || (s.length() == 2 && s.startsWith("0"))) return null;
-        int v = Integer.parseInt(s);
-        if (v < 1 || v > 36) return null;
-        if (col == COL_RED && !isRed(v)) return null;
-        if (col == COL_BLK && isRed(v)) return null;
-        return v;
-    }
-
-    private String cTag(int c) { return c == COL_RED ? "RED" : (c == COL_BLK ? "BLK" : (c == COL_GRN ? "GRN" : "---")); }
-
     private void onOcr(Integer det, int col, int s2c) {
         if (!autoScan) return;
         if (lastOcr != null && System.currentTimeMillis() - lastSubMs < LOCK_MS) return;
-        if (det == null) { cand = null; stCnt = 0; if (++blCnt >= 10) longBlank = true; ocrTxt = cTag(col) + ": --"; updateUI(); return; }
+        if (det == null) { cand = null; stCnt = 0; if (++blCnt >= 10) longBlank = true; ocrTxt = OcrHelper.cTag(col) + ": --"; updateUI(); return; }
         blCnt = 0;
-        boolean s2Shift = lastS2Col != COL_NONE && s2c != COL_NONE && s2c != lastS2Col;
-        if (lastOcr != null && lastOcr.equals(det) && !longBlank && !s2Shift) { cand = null; stCnt = 0; ocrTxt = cTag(col) + " HOLD:" + det; updateUI(); return; }
+        boolean s2Shift = lastS2Col != OcrHelper.COL_NONE && s2c != OcrHelper.COL_NONE && s2c != lastS2Col;
+        if (lastOcr != null && lastOcr.equals(det) && !longBlank && !s2Shift) { cand = null; stCnt = 0; ocrTxt = OcrHelper.cTag(col) + " HOLD:" + det; updateUI(); return; }
         if (cand != null && cand.equals(det)) stCnt++; else { cand = det; stCnt = 1; }
-        if (stCnt >= 2) { cand = null; stCnt = 0; lastS2Col = s2c; ocrTxt = cTag(col) + " ADD:" + det; submitSpin(det, "ocr"); return; }
-        ocrTxt = cTag(col) + " " + det + " (" + stCnt + "/2)"; updateUI();
+        if (stCnt >= 2) { cand = null; stCnt = 0; lastS2Col = s2c; ocrTxt = OcrHelper.cTag(col) + " ADD:" + det; submitSpin(det, "ocr"); return; }
+        ocrTxt = OcrHelper.cTag(col) + " " + det + " (" + stCnt + "/2)"; updateUI();
     }
 
     private void submitSpin(int num, String src) {
@@ -438,25 +351,17 @@ public class FloatingOverlayService extends Service {
         lastOcr = num; lastSubMs = System.currentTimeMillis(); longBlank = false; blCnt = 0; cand = null; stCnt = 0;
         int prevM = curMult, prevRem = curStepsRem;
         appendPendingSpinSync(this, num);
-        recalc();
-        loadLast5();
-
-        // Trigger HIT (Green) or MISS (Red) blink on Square Pill!
+        recalc(); loadLast5();
         startResultBlink(lastSpinWasHit);
 
-        // 32X 2nd time (stepsRem == 1) -> Alag Warning Siren + Message!
         boolean enter32x2nd = (curMult == 32 && curStepsRem == 1 && !(prevM == 32 && prevRem == 1));
         boolean enter8x = (prevM != 8 && curMult == 8);
         if (enter32x2nd) {
             SirenPlayer.start32x(this);
             Toast.makeText(this, "Aaj aapka din achha nahi hai, kal se fir koshish karein", Toast.LENGTH_LONG).show();
-        } else if (enter8x) {
-            SirenPlayer.start8x(this);
-        } else {
-            speakNum(num);
-        }
+        } else if (enter8x) SirenPlayer.start8x(this);
+        else speakNum(num);
 
-        // Check Target Profit & Stop-Loss
         SharedPreferences p = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
         int tp = p.getInt(KEY_TARGET_PROFIT, 0), sl = p.getInt(KEY_STOP_LOSS, 0);
         if (tp > 0 && curUnit >= tp && !tpFired) { tpFired = true; SirenPlayer.playGoalChime(true); Toast.makeText(this, "TARGET PROFIT (+" + tp + "U) COMPLETE!", Toast.LENGTH_LONG).show(); }
@@ -469,11 +374,8 @@ public class FloatingOverlayService extends Service {
 
     private void performUndo() {
         if (!undoLastSpinSync(this)) { Toast.makeText(this, "Undo ke liye koi spin nahi", Toast.LENGTH_SHORT).show(); return; }
-        recalc(); loadLast5();
-        lastOcr = l5Nums.isEmpty() ? null : l5Nums.get(0);
-        lastSubMs = 0L; tpFired = false; slFired = false;
-        updateUI();
-        sendBroadcast(new Intent(ACTION_UNDO_REQUESTED).setPackage(getPackageName()));
+        recalc(); loadLast5(); lastOcr = l5Nums.isEmpty() ? null : l5Nums.get(0); lastSubMs = 0L; tpFired = false; slFired = false;
+        updateUI(); sendBroadcast(new Intent(ACTION_UNDO_REQUESTED).setPackage(getPackageName()));
         Toast.makeText(this, "UNDO Done -> " + curPat + "P | " + curMult + "X", Toast.LENGTH_SHORT).show();
     }
 
@@ -489,13 +391,11 @@ public class FloatingOverlayService extends Service {
                 if (arr != null) { Set<Integer> cs = new HashSet<>(); for (int i = 0; i < arr.length(); i++) { int n = arr.optInt(i, -1); if (n >= 0 && n <= 36) cs.add(n); } pm.put(d, cs); }
             }
         } catch (Exception ignored) {}
-        int mult = 1, rem = 0, unit = 0, base = all.isEmpty() ? 1 : all.get(0);
-        boolean lastHit = false;
+        int mult = 1, rem = 0, unit = 0, base = all.isEmpty() ? 1 : all.get(0); boolean lastHit = false;
         for (int i = 0; i < all.size(); i++) {
             int sp = all.get(i), pat = (base + i) % 10; Set<Integer> inP = pm.get(pat);
             int cut = 37 - (inP != null ? inP.size() : 0); boolean hit = inP == null || !inP.contains(sp);
-            lastHit = hit;
-            unit += (hit ? (36 - cut) : -cut) * mult;
+            lastHit = hit; unit += (hit ? (36 - cut) : -cut) * mult;
             if (hit) { if (mult == 1) { mult = 2; rem = 2; } else { mult = 1; rem = 0; } }
             else if (mult > 1 && --rem == 0) { mult *= 2; rem = 2; }
         }
@@ -561,12 +461,9 @@ public class FloatingOverlayService extends Service {
     }
 
     private LinearLayout mkSquarePill() {
-        LinearLayout b = new LinearLayout(this);
-        b.setOrientation(LinearLayout.VERTICAL); b.setGravity(Gravity.CENTER_HORIZONTAL);
+        LinearLayout b = new LinearLayout(this); b.setOrientation(LinearLayout.VERTICAL); b.setGravity(Gravity.CENTER_HORIZONTAL);
         b.setLayoutParams(new FrameLayout.LayoutParams(dp(156), dp(114))); b.setPadding(dp(6), dp(5), dp(6), dp(5));
-
-        pillHead = mkTxt(9f);
-        pillInfo = mkTxt(14f); pillInfo.setTextColor(Color.parseColor("#F8FAFC"));
+        pillHead = mkTxt(9f); pillInfo = mkTxt(14f); pillInfo.setTextColor(Color.parseColor("#F8FAFC"));
 
         LinearLayout mid = new LinearLayout(this); mid.setOrientation(LinearLayout.HORIZONTAL); mid.setGravity(Gravity.CENTER_VERTICAL);
         LinearLayout.LayoutParams mlp = new LinearLayout.LayoutParams(-1, dp(24)); mlp.topMargin = dp(2); mid.setLayoutParams(mlp);
@@ -596,23 +493,28 @@ public class FloatingOverlayService extends Service {
 
     private LinearLayout mkExpanded() {
         LinearLayout p = new LinearLayout(this); p.setOrientation(LinearLayout.VERTICAL);
-        p.setLayoutParams(new FrameLayout.LayoutParams(dp(230), dp(374))); p.setBackground(bg("#0F172A", "#38BDF8", 2, 12)); p.setPadding(dp(5), dp(5), dp(5), dp(5));
+        p.setLayoutParams(new FrameLayout.LayoutParams(dp(234), dp(374))); p.setBackground(bg("#0F172A", "#38BDF8", 2, 12)); p.setPadding(dp(5), dp(5), dp(5), dp(5));
 
         LinearLayout top = new LinearLayout(this); top.setOrientation(LinearLayout.HORIZONTAL); top.setGravity(Gravity.CENTER_VERTICAL);
         LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(-1, dp(30)); tlp.bottomMargin = dp(3); top.setLayoutParams(tlp);
-        Button col = mkBtn("-", "#334155", "#475569", dp(26), dp(28)); col.setOnClickListener(v -> setExp(false));
+        Button col = mkBtn("-", "#334155", "#475569", dp(24), dp(28)); col.setOnClickListener(v -> setExp(false));
         previewImg = new ImageView(this); previewImg.setScaleType(ImageView.ScaleType.FIT_CENTER); previewImg.setBackground(bg("#000000", "#22C55E", 1, 4));
-        LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(dp(36), dp(28)); plp.leftMargin = dp(3); previewImg.setLayoutParams(plp);
-        selText = mkTxt(10.5f); selText.setText("NO: --"); selText.setTextColor(Color.parseColor("#FACC15")); selText.setLayoutParams(new LinearLayout.LayoutParams(0, dp(28), 1f));
-        Button undo = mkBtn("UNDO", "#B45309", "#F59E0B", dp(38), dp(28)); undo.setTextSize(8.5f);
-        LinearLayout.LayoutParams ulp = new LinearLayout.LayoutParams(dp(38), dp(28)); ulp.rightMargin = dp(2); undo.setLayoutParams(ulp);
+        LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(dp(34), dp(28)); plp.leftMargin = dp(2); previewImg.setLayoutParams(plp);
+        selText = mkTxt(11f); selText.setText("SPIN: --"); selText.setTextColor(Color.parseColor("#FACC15")); selText.setBackground(bg("#080D17", "#38BDF8", 1, 5));
+        LinearLayout.LayoutParams stlp = new LinearLayout.LayoutParams(0, dp(28), 1f); stlp.leftMargin = dp(3); stlp.rightMargin = dp(3); selText.setLayoutParams(stlp);
+        Button undo = mkBtn("UNDO", "#B45309", "#F59E0B", dp(36), dp(28)); undo.setTextSize(8f);
+        LinearLayout.LayoutParams ulp = new LinearLayout.LayoutParams(dp(36), dp(28)); ulp.rightMargin = dp(2); undo.setLayoutParams(ulp);
         undo.setOnClickListener(v -> performUndo());
         Button go = mkBtn("GO", "#22C55E", "#16A34A", dp(36), dp(28)); go.setTextColor(Color.parseColor("#052E16"));
-        go.setOnClickListener(v -> { if (selNum == null) return; submitSpin(selNum, "manual"); selNum = null; selText.setText("NO: --"); });
+        go.setOnClickListener(v -> {
+            Integer val = selNum;
+            if (!typedSpin.isEmpty()) { try { val = Integer.parseInt(typedSpin); } catch (Exception ignored) { val = null; } }
+            if (val == null || val < 0 || val > 36) { Toast.makeText(this, "0 se 36 ke beech dalein", Toast.LENGTH_SHORT).show(); typedSpin = ""; selNum = null; selText.setText("SPIN: --"); return; }
+            submitSpin(val, "manual"); typedSpin = ""; selNum = null; selText.setText("SPIN: --");
+        });
         top.addView(col); top.addView(previewImg); top.addView(selText); top.addView(undo); top.addView(go); p.addView(top);
 
-        msg32xTxt = new TextView(this);
-        msg32xTxt.setText("Aaj aapka din achha nahi hai, kal se fir koshish karein");
+        msg32xTxt = new TextView(this); msg32xTxt.setText("Aaj aapka din achha nahi hai, kal se fir koshish karein");
         msg32xTxt.setTextColor(Color.parseColor("#FEF08A")); msg32xTxt.setTextSize(9.5f); msg32xTxt.setTypeface(Typeface.DEFAULT_BOLD);
         msg32xTxt.setGravity(Gravity.CENTER); msg32xTxt.setBackground(bg("#7F1D1D", "#FACC15", 1, 6)); msg32xTxt.setPadding(dp(4), dp(3), dp(4), dp(3));
         LinearLayout.LayoutParams m32 = new LinearLayout.LayoutParams(-1, -2); m32.bottomMargin = dp(3); msg32xTxt.setLayoutParams(m32);
@@ -624,34 +526,61 @@ public class FloatingOverlayService extends Service {
 
         LinearLayout row = new LinearLayout(this); row.setOrientation(LinearLayout.HORIZONTAL);
         LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(-1, dp(26)); rlp.bottomMargin = dp(3); row.setLayoutParams(rlp);
-        scanBtn = mkBtn("AUTO", "#334155", "#475569", 0, dp(26)); scanBtn.setTextSize(8.5f);
+        scanBtn = mkBtn("AUTO", "#334155", "#475569", 0, dp(26)); scanBtn.setTextSize(8f);
         LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(0, dp(26), 1f); slp.rightMargin = dp(2); scanBtn.setLayoutParams(slp);
         scanBtn.setOnClickListener(v -> { if (!capOn) { Toast.makeText(this, "App se START AUTO CAPTURE dabayein", Toast.LENGTH_SHORT).show(); return; } autoScan = !autoScan; ocrTxt = autoScan ? "READY" : "PAUSED"; bcastCap(); updateUI(); });
-        lockBtn = mkBtn("LOCK", "#334155", "#475569", 0, dp(26)); lockBtn.setTextSize(8.5f);
+        lockBtn = mkBtn("LOCK", "#334155", "#475569", 0, dp(26)); lockBtn.setTextSize(8f);
         LinearLayout.LayoutParams llp = new LinearLayout.LayoutParams(0, dp(26), 1f); llp.rightMargin = dp(2); lockBtn.setLayoutParams(llp);
         lockBtn.setOnClickListener(v -> { if (!boxVis) mkBox(); else toggleLock(); });
-        voiceBtn = mkBtn("VOX:ON", "#15803D", "#22C55E", 0, dp(26)); voiceBtn.setTextSize(8.5f); voiceBtn.setLayoutParams(new LinearLayout.LayoutParams(0, dp(26), 1f));
-        voiceBtn.setOnClickListener(v -> {
-            voiceOn = !voiceOn; getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit().putBoolean("voiceOn", voiceOn).apply();
-            if (!voiceOn && tts != null) { try { tts.stop(); } catch (Exception ignored) {} }
-            updateUI();
-        });
-        row.addView(scanBtn); row.addView(lockBtn); row.addView(voiceBtn); p.addView(row);
+        voiceBtn = mkBtn("VOX", "#15803D", "#22C55E", 0, dp(26)); voiceBtn.setTextSize(8f);
+        LinearLayout.LayoutParams vlp = new LinearLayout.LayoutParams(0, dp(26), 1f); vlp.rightMargin = dp(2); voiceBtn.setLayoutParams(vlp);
+        voiceBtn.setOnClickListener(v -> { voiceOn = !voiceOn; getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit().putBoolean("voiceOn", voiceOn).apply(); if (!voiceOn && tts != null) { try { tts.stop(); } catch (Exception ignored) {} } updateUI(); });
+        modeBtn = mkBtn("0-36", "#4F46E5", "#818CF8", 0, dp(26)); modeBtn.setTextSize(8f); modeBtn.setLayoutParams(new LinearLayout.LayoutParams(0, dp(26), 1f));
+        modeBtn.setOnClickListener(v -> { showGrid36 = !showGrid36; numPadView.setVisibility(showGrid36 ? View.GONE : View.VISIBLE); grid36View.setVisibility(showGrid36 ? View.VISIBLE : View.GONE); modeBtn.setText(showGrid36 ? "123" : "0-36"); });
+        row.addView(scanBtn); row.addView(lockBtn); row.addView(voiceBtn); row.addView(modeBtn); p.addView(row);
 
         expInfo = mkTxt(10f); expInfo.setTextColor(Color.parseColor("#F8FAFC")); expInfo.setBackground(bg("#1E293B", "#334155", 1, 6));
         LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(-1, dp(24)); ilp.bottomMargin = dp(3); expInfo.setLayoutParams(ilp); p.addView(expInfo);
 
-        GridLayout g = new GridLayout(this); g.setColumnCount(7); g.setRowCount(6); g.setLayoutParams(new LinearLayout.LayoutParams(-1, 0, 1f));
-        int cw = dp(29), ch = dp(30), m = dp(1);
+        FrameLayout area = new FrameLayout(this); area.setLayoutParams(new LinearLayout.LayoutParams(-1, 0, 1f));
+        numPadView = mkNumPad(); grid36View = mkGrid36(); grid36View.setVisibility(View.GONE);
+        area.addView(numPadView); area.addView(grid36View); p.addView(area);
+        updateUI(); return p;
+    }
+
+    private View mkNumPad() {
+        LinearLayout box = new LinearLayout(this); box.setOrientation(LinearLayout.VERTICAL); box.setLayoutParams(new FrameLayout.LayoutParams(-1, -1));
+        String[][] rows = {{"1","2","3"},{"4","5","6"},{"7","8","9"},{"C","0","<"}};
+        for (String[] r : rows) {
+            LinearLayout lr = new LinearLayout(this); lr.setOrientation(LinearLayout.HORIZONTAL); lr.setLayoutParams(new LinearLayout.LayoutParams(-1, 0, 1f));
+            for (String k : r) {
+                Button bt = mkBtn(k, "C".equals(k) ? "#7F1D1D" : ("<".equals(k) ? "#475569" : "#1E293B"), "#38BDF8", 0, -1); bt.setTextSize(15f);
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, -1, 1f); lp.setMargins(dp(2), dp(2), dp(2), dp(2)); bt.setLayoutParams(lp);
+                bt.setOnClickListener(v -> {
+                    if ("C".equals(k)) { typedSpin = ""; selNum = null; }
+                    else if ("<".equals(k)) { if (!typedSpin.isEmpty()) typedSpin = typedSpin.substring(0, typedSpin.length() - 1); selNum = null; }
+                    else if (typedSpin.length() < 2) { typedSpin += k; selNum = null; }
+                    selText.setText(typedSpin.isEmpty() ? "SPIN: --" : "SPIN: " + typedSpin);
+                });
+                lr.addView(bt);
+            }
+            box.addView(lr);
+        }
+        return box;
+    }
+
+    private View mkGrid36() {
+        GridLayout g = new GridLayout(this); g.setColumnCount(7); g.setRowCount(6); g.setLayoutParams(new FrameLayout.LayoutParams(-1, -1));
+        int cw = dp(30), ch = dp(30), m = dp(1);
         for (int n = 0; n <= 36; n++) {
-            final int num = n; Button bt = mkBtn(String.valueOf(n), n == 0 ? "#15803D" : (isRed(n) ? "#B91C1C" : "#1E293B"), "#334155", cw, ch);
+            final int num = n; Button bt = mkBtn(String.valueOf(n), n == 0 ? "#15803D" : (OcrHelper.isRed(n) ? "#B91C1C" : "#1E293B"), "#334155", cw, ch);
             GridLayout.LayoutParams glp = new GridLayout.LayoutParams(); glp.width = cw; glp.height = ch; glp.setMargins(m, m, m, m); bt.setLayoutParams(glp);
-            bt.setOnClickListener(v -> { selNum = num; selText.setText("NO: " + num); }); g.addView(bt);
+            bt.setOnClickListener(v -> { selNum = num; typedSpin = String.valueOf(num); selText.setText("SPIN: " + num); }); g.addView(bt);
         }
         Button rep = mkBtn("R", "#0284C7", "#38BDF8", cw, ch);
         GridLayout.LayoutParams rglp = new GridLayout.LayoutParams(); rglp.width = cw; rglp.height = ch; rglp.setMargins(m, m, m, m); rep.setLayoutParams(rglp);
         rep.setOnClickListener(v -> { if (lastOcr != null) submitSpin(lastOcr, "manual"); }); g.addView(rep);
-        p.addView(g); updateUI(); return p;
+        return g;
     }
 
     private TextView mkTxt(float sp) { TextView t = new TextView(this); t.setTextSize(sp); t.setTypeface(Typeface.DEFAULT_BOLD); t.setGravity(Gravity.CENTER); t.setMaxLines(1); return t; }
@@ -661,47 +590,38 @@ public class FloatingOverlayService extends Service {
     }
 
     private void updateUI() {
-        boolean sir = SirenPlayer.isPlaying();
-        boolean is32 = sir && SirenPlayer.TYPE_32X.equals(SirenPlayer.getActiveType());
+        boolean sir = SirenPlayer.isPlaying(), is32 = sir && SirenPlayer.TYPE_32X.equals(SirenPlayer.getActiveType());
         boolean flashOn = (blinkStepsLeft > 0 && (blinkStepsLeft % 2 == 1));
         String mode = is32 ? "32X ALERT" : (curMult == 8 ? "8X ALERT" : (curPlay ? "PLAY NOW" : "BASE"));
         String info = curPat + "P • BET " + curMult + "X", u = curUnit > 0 ? "+" + curUnit : String.valueOf(curUnit);
 
         if (pillView != null) {
-            if (flashOn && blinkTone == 1) pillView.setBackground(bg("#059669", "#86EFAC", 3, 12));      // HIT Green Blink!
-            else if (flashOn && blinkTone == 2) pillView.setBackground(bg("#DC2626", "#FCA5A5", 3, 12)); // MISS Red Blink!
+            if (flashOn && blinkTone == 1) pillView.setBackground(bg("#059669", "#86EFAC", 3, 12));
+            else if (flashOn && blinkTone == 2) pillView.setBackground(bg("#DC2626", "#FCA5A5", 3, 12));
             else if (is32) pillView.setBackground(bg("#7F1D1D", "#FACC15", 3, 12));
             else if (sir) pillView.setBackground(bg("#991B1B", "#FCA5A5", 2, 12));
             else pillView.setBackground(curMult == 8 ? bg("#450A0A", "#EF4444", 2, 12) : bg(curPlay ? "#0B2922" : "#0F172A", curPlay ? "#22C55E" : "#38BDF8", 2, 12));
         }
-        if (pillHead != null) {
-            pillHead.setText(is32 ? "32X (2ND) - TAP OFF" : (sir ? "8X SIREN - TAP OFF" : (mode + " | U:" + u)));
-            pillHead.setTextColor(Color.parseColor(sir ? "#FEF08A" : (curMult == 8 ? "#FCA5A5" : (curPlay ? "#4ADE80" : "#38BDF8"))));
-        }
+        if (pillHead != null) { pillHead.setText(is32 ? "32X (2ND)-TAP OFF" : (sir ? "8X SIREN-TAP OFF" : (mode + " | U:" + u))); pillHead.setTextColor(Color.parseColor(sir ? "#FEF08A" : (curMult == 8 ? "#FCA5A5" : (curPlay ? "#4ADE80" : "#38BDF8")))); }
         if (pillInfo != null) pillInfo.setText(info);
-        if (pillOcr != null) {
-            pillOcr.setText(is32 ? "Kal se fir koshish!" : (sir ? "TAP TO OFF" : ocrTxt));
-            pillOcr.setTextColor(Color.parseColor(sir ? "#FFFFFF" : (autoScan ? "#FACC15" : "#94A3B8")));
-        }
+        if (pillOcr != null) { pillOcr.setText(is32 ? "Kal se fir koshish!" : (sir ? "TAP TO OFF" : ocrTxt)); pillOcr.setTextColor(Color.parseColor(sir ? "#FFFFFF" : (autoScan ? "#FACC15" : "#94A3B8"))); }
         for (int i = 0; i < 5; i++) {
             if (l5Views[i] == null) continue;
-            if (i < l5Nums.size()) {
-                int n = l5Nums.get(i); l5Views[i].setText(String.valueOf(n));
-                l5Views[i].setBackground(bg(n == 0 ? "#15803D" : (isRed(n) ? "#B91C1C" : "#111827"), i == 0 ? "#FACC15" : "#475569", 1, 4));
-            } else { l5Views[i].setText("-"); l5Views[i].setBackground(bg("#1E293B", "#334155", 1, 4)); }
+            if (i < l5Nums.size()) { int n = l5Nums.get(i); l5Views[i].setText(String.valueOf(n)); l5Views[i].setBackground(bg(n == 0 ? "#15803D" : (OcrHelper.isRed(n) ? "#B91C1C" : "#111827"), i == 0 ? "#FACC15" : "#475569", 1, 4)); }
+            else { l5Views[i].setText("-"); l5Views[i].setBackground(bg("#1E293B", "#334155", 1, 4)); }
         }
         if (msg32xTxt != null) msg32xTxt.setVisibility(is32 ? View.VISIBLE : View.GONE);
         if (sirenBtn != null) { sirenBtn.setVisibility(sir ? View.VISIBLE : View.GONE); sirenBtn.setText(is32 ? "STOP 32X SIREN (OFF)" : "STOP 8X SIREN (OFF)"); }
         if (expInfo != null) expInfo.setText(ocrTxt + " | " + info + " | U:" + u);
-        if (scanBtn != null) { scanBtn.setText(autoScan ? "AUTO:ON" : "AUTO:OFF"); scanBtn.setBackground(bg(autoScan ? "#15803D" : "#334155", autoScan ? "#22C55E" : "#475569", 1, 5)); }
-        if (lockBtn != null) { lockBtn.setText(boxLock ? "UNLOCK" : "LOCK"); lockBtn.setBackground(bg(boxLock ? "#0369A1" : "#334155", boxLock ? "#38BDF8" : "#475569", 1, 5)); }
-        if (voiceBtn != null) { voiceBtn.setText(voiceOn ? "VOX:ON" : "VOX:OFF"); voiceBtn.setBackground(bg(voiceOn ? "#15803D" : "#334155", voiceOn ? "#22C55E" : "#475569", 1, 5)); }
+        if (scanBtn != null) { scanBtn.setText(autoScan ? "AUTO" : "OFF"); scanBtn.setBackground(bg(autoScan ? "#15803D" : "#334155", autoScan ? "#22C55E" : "#475569", 1, 5)); }
+        if (lockBtn != null) { lockBtn.setText(boxLock ? "UNLK" : "LOCK"); lockBtn.setBackground(bg(boxLock ? "#0369A1" : "#334155", boxLock ? "#38BDF8" : "#475569", 1, 5)); }
+        if (voiceBtn != null) { voiceBtn.setText(voiceOn ? "VOX" : "MUTE"); voiceBtn.setBackground(bg(voiceOn ? "#15803D" : "#334155", voiceOn ? "#22C55E" : "#475569", 1, 5)); }
     }
 
     private void setExp(boolean ex) {
         if (root == null || params == null || wm == null) return;
         pillView.setVisibility(ex ? View.GONE : View.VISIBLE); expandedView.setVisibility(ex ? View.VISIBLE : View.GONE);
-        params.width = dp(ex ? 230 : 156); params.height = dp(ex ? 374 : 114); wm.updateViewLayout(root, params);
+        params.width = dp(ex ? 234 : 156); params.height = dp(ex ? 374 : 114); wm.updateViewLayout(root, params);
     }
 
     private void addDrag(View v) {
@@ -720,7 +640,6 @@ public class FloatingOverlayService extends Service {
         });
     }
 
-    private boolean isRed(int n) { for (int r : new int[]{1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36}) if (r == n) return true; return false; }
     private GradientDrawable bg(String f, String s, int sw, int r) { GradientDrawable g = new GradientDrawable(); g.setColor(Color.parseColor(f)); g.setStroke(dp(sw), Color.parseColor(s)); g.setCornerRadius(dp(r)); return g; }
     private int dp(int v) { return Math.round(v * getResources().getDisplayMetrics().density); }
     private void rmOvl() { if (root != null && wm != null) { try { wm.removeView(root); } catch (Exception ignored) {} root = null; } }
