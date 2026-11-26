@@ -10,6 +10,7 @@ import android.media.*;
 import android.media.projection.*;
 import android.os.*;
 import android.provider.Settings;
+import android.speech.tts.TextToSpeech;
 import android.util.DisplayMetrics;
 import android.view.*;
 import android.widget.*;
@@ -132,6 +133,8 @@ public class FloatingOverlayService extends Service {
     private Button scanBtn, lockBtn, sirenBtn;
     private ImageView previewImg;
     private Bitmap lastPrevBmp = null;
+    private TextToSpeech tts;
+    private boolean ttsReady = false;
 
     private volatile int boxSX = 0, boxSY = 0, boxSW = 0, boxSH = 0;
     private boolean boxVis = false, boxLock = false, capOn = false, autoScan = false;
@@ -172,6 +175,20 @@ public class FloatingOverlayService extends Service {
             if (nm != null) nm.createNotificationChannel(new NotificationChannel(CH_ID, "Magic Spin Overlay", NotificationManager.IMPORTANCE_LOW));
         }
         ocr = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
+        tts = new TextToSpeech(this, st -> {
+            if (st == TextToSpeech.SUCCESS && tts != null) {
+                int r = tts.setLanguage(new Locale("en", "IN"));
+                if (r == TextToSpeech.LANG_MISSING_DATA || r == TextToSpeech.LANG_NOT_SUPPORTED) tts.setLanguage(Locale.US);
+                tts.setSpeechRate(1.05f);
+                ttsReady = true;
+            }
+        });
+    }
+
+    private void speakNumberOnly(int num) {
+        if (tts != null && ttsReady) {
+            try { tts.speak(String.valueOf(num), TextToSpeech.QUEUE_FLUSH, null, "n_" + num); } catch (Exception ignored) {}
+        }
     }
 
     @Override public IBinder onBind(Intent i) { return null; }
@@ -415,7 +432,9 @@ public class FloatingOverlayService extends Service {
         if (num < 0 || num > 36) return;
         lastOcr = num; lastSubMs = System.currentTimeMillis(); longBlank = false; blCnt = 0; cand = null; stCnt = 0;
         appendPendingSpinSync(this, num);
-        int pm = curMult; recalc(); if (pm != 8 && curMult == 8) startPoliceSiren(this);
+        int pm = curMult; recalc();
+        if (pm != 8 && curMult == 8) startPoliceSiren(this);
+        else speakNumberOnly(num); // Speak ONLY the scanned number!
         loadLast5(); updateUI();
         sendBroadcast(new Intent(ACTION_NUMBER_SUBMITTED).setPackage(getPackageName()).putExtra(EXTRA_NUMBER, num).putExtra(EXTRA_SOURCE, src));
         Toast.makeText(this, ("ocr".equals(src) ? "Auto: " : "Spin: ") + num + " -> " + curPat + "P | " + curMult + "X", Toast.LENGTH_SHORT).show();
@@ -491,7 +510,6 @@ public class FloatingOverlayService extends Service {
 
     private void mkOvl() {
         wm = (WindowManager) getSystemService(WINDOW_SERVICE); if (wm == null) return;
-        // Compact Square Box (152dp x 112dp)
         params = new WindowManager.LayoutParams(dp(152), dp(112), winType(), WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN, PixelFormat.TRANSLUCENT);
         params.gravity = Gravity.TOP | Gravity.START; params.x = dp(14); params.y = dp(90);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) params.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
@@ -634,6 +652,7 @@ public class FloatingOverlayService extends Service {
 
     @Override public void onDestroy() {
         isRunning = false; stopPoliceSiren(this); stopCap(); rmBox(); rmOvl();
+        if (tts != null) { try { tts.stop(); tts.shutdown(); } catch (Exception ignored) {} tts = null; }
         if (lastPrevBmp != null && !lastPrevBmp.isRecycled()) lastPrevBmp.recycle();
         if (ocr != null) { try { ocr.close(); } catch (Exception ignored) {} }
         super.onDestroy();
