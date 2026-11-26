@@ -1,28 +1,48 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { PinOff, Volume2, VolumeX, Expand } from 'lucide-react';
-import { calculateRecords } from '@/lib/game';
+import { calculateRecords, type PatternMap } from '@/lib/game';
 import { playClick } from '@/lib/sound';
 import { vibrate } from '@/lib/haptics';
 
 interface PinWidgetProps {
   spins: number[];
+  patterns?: PatternMap;
   soundOn: boolean;
   onAddSpin: (num: number) => void;
   onUnpin: () => void;
 }
 
-export default function PinWidget({ spins, soundOn, onAddSpin, onUnpin }: PinWidgetProps) {
+export default function PinWidget({
+  spins,
+  patterns,
+  soundOn,
+  onAddSpin,
+  onUnpin,
+}: PinWidgetProps) {
   const [input, setInput] = useState('');
   const [pos, setPos] = useState({ x: 0, y: 0 });
+  const [blinkTone, setBlinkTone] = useState<'HIT' | 'MISS' | null>(null);
+  const prevLenRef = useRef<number>(spins.length);
   const dragRef = useRef<{ startX: number; startY: number; baseX: number; baseY: number } | null>(null);
 
   const rawState = useMemo(() => {
     try {
-      return calculateRecords(spins);
+      return calculateRecords(spins, patterns);
     } catch {
       return null;
     }
-  }, [spins]);
+  }, [spins, patterns]);
+
+  useEffect(() => {
+    if (spins.length > prevLenRef.current && rawState?.records.length) {
+      const last = rawState.records[rawState.records.length - 1];
+      setBlinkTone(last.statusType);
+      const t = window.setTimeout(() => setBlinkTone(null), 1600);
+      prevLenRef.current = spins.length;
+      return () => window.clearTimeout(t);
+    }
+    prevLenRef.current = spins.length;
+  }, [spins.length, rawState]);
 
   const safe = {
     isNextPlay: Boolean(rawState?.isNextPlay),
@@ -63,6 +83,15 @@ export default function PinWidget({ spins, soundOn, onAddSpin, onUnpin }: PinWid
 
   const lastSpin = spins.length ? spins[spins.length - 1] : null;
 
+  const boxClass =
+    blinkTone === 'HIT'
+      ? 'border-[#22c55e] bg-[#064e3b] shadow-[0_0_28px_rgba(34,197,94,0.85)] animate-pulse'
+      : blinkTone === 'MISS'
+        ? 'border-[#ef4444] bg-[#7f1d1d] shadow-[0_0_28px_rgba(239,68,68,0.85)] animate-pulse'
+        : safe.isNextPlay
+          ? 'border-[#35df91] bg-gradient-to-b from-[#141f33] to-[#0b1220] shadow-[0_0_18px_rgba(53,223,145,0.28)]'
+          : 'border-[#2b3b5b] bg-gradient-to-b from-[#141f33] to-[#0b1220]';
+
   return (
     <div
       className="fixed inset-0 pointer-events-none flex items-center justify-center p-2 z-50"
@@ -70,11 +99,7 @@ export default function PinWidget({ spins, soundOn, onAddSpin, onUnpin }: PinWid
     >
       <div
         style={{ transform: `translate(${pos.x}px, ${pos.y}px)` }}
-        className={`pointer-events-auto w-[156px] rounded-xl border bg-gradient-to-b from-[#141f33] to-[#0b1220] shadow-[0_12px_32px_rgba(0,0,0,0.75)] select-none ${
-          safe.isNextPlay
-            ? 'border-[#35df91] shadow-[0_0_18px_rgba(53,223,145,0.28)]'
-            : 'border-[#2b3b5b]'
-        }`}
+        className={`pointer-events-auto w-[160px] rounded-xl border-2 shadow-[0_12px_32px_rgba(0,0,0,0.75)] select-none transition-colors ${boxClass}`}
       >
         <div
           onPointerDown={onPointerDown}
@@ -85,29 +110,25 @@ export default function PinWidget({ spins, soundOn, onAddSpin, onUnpin }: PinWid
           <div className="flex items-center gap-1 min-w-0">
             <span
               className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-                safe.isNextPlay ? 'bg-[#35df91] animate-pulse' : 'bg-[#ffc45c]'
+                blinkTone === 'MISS'
+                  ? 'bg-[#ef4444]'
+                  : safe.isNextPlay
+                    ? 'bg-[#35df91] animate-pulse'
+                    : 'bg-[#ffc45c]'
               }`}
             />
             <span className="text-[#ffdf91] font-black tracking-[0.12em] text-[10px] truncate">
-              MAGIC
+              {blinkTone === 'HIT' ? 'HIT!' : blinkTone === 'MISS' ? 'MISS!' : 'MAGIC'}
             </span>
           </div>
           <div className="flex items-center gap-0.5 shrink-0">
-            <button
-              onClick={onUnpin}
-              title="Full screen"
-              className="text-[#9baac2] hover:text-white p-0.5 active:scale-90 transition"
-            >
+            <button onClick={onUnpin} title="Full screen" className="text-[#9baac2] hover:text-white p-0.5">
               <Expand className="w-3 h-3" />
             </button>
-            <span title={soundOn ? 'Sound ON' : 'Sound OFF'} className="text-[#9baac2] p-0.5 pointer-events-none">
+            <span className="text-[#9baac2] p-0.5 pointer-events-none">
               {soundOn ? <Volume2 className="w-3 h-3" /> : <VolumeX className="w-3 h-3" />}
             </span>
-            <button
-              onClick={onUnpin}
-              title="Unpin"
-              className="text-[#9baac2] hover:text-white p-0.5 active:scale-90 transition"
-            >
+            <button onClick={onUnpin} title="Unpin" className="text-[#9baac2] hover:text-white p-0.5">
               <PinOff className="w-3 h-3" />
             </button>
           </div>
@@ -157,10 +178,7 @@ export default function PinWidget({ spins, soundOn, onAddSpin, onUnpin }: PinWid
 
           <div className="flex items-center justify-between text-[9px] text-[#9baac2] font-semibold px-0.5">
             <span>
-              L:{' '}
-              <b className={lastSpin === 0 ? 'text-[#35df91]' : 'text-white'}>
-                {lastSpin !== null ? lastSpin : '-'}
-              </b>
+              L: <b className={lastSpin === 0 ? 'text-[#35df91]' : 'text-white'}>{lastSpin !== null ? lastSpin : '-'}</b>
             </span>
             <span>
               <b className="text-[#35df91]">{safe.hits}</b>/<b className="text-[#ff6474]">{safe.misses}</b>
@@ -169,13 +187,8 @@ export default function PinWidget({ spins, soundOn, onAddSpin, onUnpin }: PinWid
 
           <div className="grid grid-cols-5 gap-0.5">
             {spins.slice(-5).reverse().map((n, i) => (
-              <div
-                key={`${spins.length - i}-${n}`}
-                className="bg-[#080f1d] border border-[#344766] rounded py-0.5 text-center"
-              >
-                <div className={`text-[10px] font-black leading-tight ${n === 0 ? 'text-[#35df91]' : 'text-white'}`}>
-                  {n}
-                </div>
+              <div key={`${spins.length - i}-${n}`} className="bg-[#080f1d] border border-[#344766] rounded py-0.5 text-center">
+                <div className={`text-[10px] font-black leading-tight ${n === 0 ? 'text-[#35df91]' : 'text-white'}`}>{n}</div>
               </div>
             ))}
           </div>
