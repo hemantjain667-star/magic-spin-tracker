@@ -1,5 +1,7 @@
 import { Capacitor, registerPlugin, type PluginListenerHandle } from '@capacitor/core';
 
+export type SirenType = 'none' | '8x' | '32x';
+
 export interface SyncStateOptions {
   pattern: number;
   multiplier: number;
@@ -10,6 +12,8 @@ export interface SyncStateOptions {
   lastSpin: number;
   spinsJson: string;
   patternsJson: string;
+  targetProfit: number;
+  stopLoss: number;
 }
 
 export interface FloatingOverlayPluginInterface {
@@ -21,6 +25,7 @@ export interface FloatingOverlayPluginInterface {
   stopScreenCapture(): Promise<void>;
   toggleTargetBox(): Promise<{ visible: boolean }>;
   drainPendingSpins(): Promise<{ spins: number[] }>;
+  drainPendingActions(): Promise<{ spins: number[]; undoCount: number }>;
   syncState(options: SyncStateOptions): Promise<void>;
   updateInfo(options: {
     pattern: number;
@@ -28,11 +33,16 @@ export interface FloatingOverlayPluginInterface {
     isPlaying: boolean;
   }): Promise<void>;
   startSiren(): Promise<void>;
+  startSiren32x(): Promise<void>;
   stopSiren(): Promise<void>;
-  getSirenState(): Promise<{ playing: boolean }>;
+  getSirenState(): Promise<{ playing: boolean; type: SirenType }>;
   addListener(
     eventName: 'spinNumberSubmitted',
     listenerFunc: (data: { number: number; source?: string }) => void
+  ): Promise<PluginListenerHandle>;
+  addListener(
+    eventName: 'undoRequested',
+    listenerFunc: () => void
   ): Promise<PluginListenerHandle>;
   addListener(
     eventName: 'captureStatusChanged',
@@ -40,7 +50,7 @@ export interface FloatingOverlayPluginInterface {
   ): Promise<PluginListenerHandle>;
   addListener(
     eventName: 'sirenStatusChanged',
-    listenerFunc: (data: { playing: boolean }) => void
+    listenerFunc: (data: { playing: boolean; type?: SirenType }) => void
   ): Promise<PluginListenerHandle>;
 }
 
