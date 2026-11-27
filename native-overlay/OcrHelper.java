@@ -22,14 +22,13 @@ public class OcrHelper {
         int w = b.getWidth(), h = b.getHeight(), r = 0, g = 0, k = 0, t = 0;
         int st = Math.max(1, Math.min(w, h) / 24);
         float[] hsv = new float[3];
-        int x0 = (w * 15) / 100, x1 = w - x0, y0 = (h * 20) / 100, y1 = h - y0;
+        int x0 = (w * 18) / 100, x1 = w - x0, y0 = (h * 22) / 100, y1 = h - y0;
         if (x1 <= x0) { x0 = 0; x1 = w; }
         if (y1 <= y0) { y0 = 0; y1 = h; }
         for (int y = y0; y < y1; y += st) {
             for (int x = x0; x < x1; x += st) {
                 int c = b.getPixel(x, y);
                 int cr = Color.red(c), cg = Color.green(c), cb = Color.blue(c);
-                // Ignore pure white digits
                 if (Math.min(cr, Math.min(cg, cb)) > 135) continue;
                 Color.RGBToHSV(cr, cg, cb, hsv);
                 t++;
@@ -37,7 +36,7 @@ public class OcrHelper {
                         || (cg > cr + 16 && cg > cb + 6 && cg > 45);
                 if (isGreenPx) g++;
                 else if ((hsv[0] <= 22f || hsv[0] >= 335f) && hsv[1] >= 0.32f && hsv[2] >= 0.18f) r++;
-                else if (hsv[2] <= 0.36f && hsv[1] <= 0.50f) k++;
+                else if (hsv[2] <= 0.38f && hsv[1] <= 0.50f) k++;
             }
         }
         if (t < 8) return COL_NONE;
@@ -57,9 +56,8 @@ public class OcrHelper {
         if (col == COL_GRN) return 0;
         if (col == COL_BLK && (s.equals("0") || s.equalsIgnoreCase("O"))) return 0;
 
-        // Smart single/double-digit OCR cleanup (strictly guarded by Red/Black color check!)
         s = s.replace('O', '0').replace('o', '0').replace('D', '0').replace('Q', '0')
-                .replace('I', '1').replace('l', '1').replace('|', '1').replace('!', '1').replace('i', '1')
+                .replace('I', '1').replace('l', '1').replace('|', '1').replace('!', '1').replace('i', '1').replace(']', '1')
                 .replace('Z', '2').replace('z', '2')
                 .replace('S', '5').replace('s', '5')
                 .replace('G', '6').replace('b', '6')
@@ -74,33 +72,56 @@ public class OcrHelper {
         return v;
     }
 
-    // Smooth upscale FIRST + pure white digit isolation (zero jagged pixels, zero white-border noise!)
+    // Smooth upscale + Row/Col Border-Line Auto-Eraser (100% removes Evolution's white outline!)
     public static Bitmap cleanWhiteDigits(Bitmap s, boolean[] hints) {
         int sw = Math.max(1, s.getWidth()), sh = Math.max(1, s.getHeight());
-        // Shave outer 8% left/right and 10% top/bottom to cleanly strip Evolution's white outline
-        int mx = Math.max(2, (sw * 8) / 100);
-        int my = Math.max(2, (sh * 10) / 100);
-        int iw = Math.max(4, sw - mx * 2), ih = Math.max(4, sh - my * 2);
-        Bitmap inner = Bitmap.createBitmap(s, Math.min(mx, sw - 4), Math.min(my, sh - 4), iw, ih);
-
-        // Smooth bilinear upscale to ~160px tall
-        float sc = Math.max(2.5f, Math.min(5.0f, 160f / Math.max(1, ih)));
-        int tw = Math.min(360, Math.round(iw * sc)), th = Math.min(260, Math.round(ih * sc));
-        Bitmap up = Bitmap.createScaledBitmap(inner, tw, th, true);
-        inner.recycle();
+        float sc = Math.max(2.5f, Math.min(5.0f, 160f / Math.max(1, sh)));
+        int tw = Math.min(360, Math.round(sw * sc)), th = Math.min(260, Math.round(sh * sc));
+        Bitmap up = Bitmap.createScaledBitmap(s, tw, th, true);
 
         int[] px = new int[tw * th];
         up.getPixels(px, 0, tw, 0, 0, tw, th);
         up.recycle();
 
+        boolean[] ink = new boolean[tw * th];
+        for (int i = 0; i < px.length; i++) {
+            int c = px[i];
+            ink[i] = Math.min(Color.red(c), Math.min(Color.green(c), Color.blue(c))) >= 125;
+        }
+
+        // 1. Erase horizontal border lines (any row with >58% white pixels = outline box line!)
+        boolean[] eraseRow = new boolean[th];
+        for (int y = 0; y < th; y++) {
+            int cnt = 0;
+            for (int x = 0; x < tw; x++) if (ink[y * tw + x]) cnt++;
+            if (cnt * 100 / tw >= 58) {
+                for (int dy = -3; dy <= 3; dy++) {
+                    int ny = y + dy;
+                    if (ny >= 0 && ny < th) eraseRow[ny] = true;
+                }
+            }
+        }
+        // 2. Erase vertical border lines near left/right edges (outer 24% columns with >55% height!)
+        boolean[] eraseCol = new boolean[tw];
+        int edgeLim = (tw * 24) / 100;
+        for (int x = 0; x < tw; x++) {
+            if (x > edgeLim && x < tw - edgeLim) continue;
+            int cnt = 0;
+            for (int y = 0; y < th; y++) if (ink[y * tw + x]) cnt++;
+            if (cnt * 100 / th >= 55) {
+                for (int dx = -3; dx <= 3; dx++) {
+                    int nx = x + dx;
+                    if (nx >= 0 && nx < tw) eraseCol[nx] = true;
+                }
+            }
+        }
+        // Also clear outermost 4px rim
         int minX = tw, maxX = -1, minY = th, maxY = -1, darkCnt = 0;
         for (int y = 0; y < th; y++) {
             for (int x = 0; x < tw; x++) {
-                int c = px[y * tw + x];
-                int r = Color.red(c), g = Color.green(c), b = Color.blue(c);
-                // White digit pixels have high R, G, AND B (Red/Green/Black/Gold backgrounds fail this!)
-                boolean isWhiteDigit = Math.min(r, Math.min(g, b)) >= 128;
-                if (isWhiteDigit) {
+                boolean rim = (x < 4 || x >= tw - 4 || y < 4 || y >= th - 4);
+                boolean keep = ink[y * tw + x] && !rim && !eraseRow[y] && !eraseCol[x];
+                if (keep) {
                     px[y * tw + x] = Color.BLACK;
                     darkCnt++;
                     if (x < minX) minX = x; if (x > maxX) maxX = x;
@@ -111,11 +132,11 @@ public class OcrHelper {
             }
         }
 
-        if (darkCnt >= 140) {
-            hints[1] = true; // Clear digit present inside badge (confirms Green 0!)
+        if (darkCnt >= 120) {
+            hints[1] = true; // Clean digit inside badge (for Green 0!)
             int dw = maxX - minX + 1, dh = maxY - minY + 1;
-            if (dh >= th / 3 && dw >= 6 && dw <= Math.round(dh * 0.44f)) {
-                hints[0] = true; // Thin vertical single digit "1" fallback
+            if (dh >= th / 4 && dw >= 5 && dw <= Math.round(dh * 0.48f)) {
+                hints[0] = true; // Clean narrow single-digit "1" (for Red 1!)
             }
         }
 
@@ -133,7 +154,7 @@ public class OcrHelper {
 
     public static Bitmap padCol(Bitmap s) {
         int sw = Math.max(1, s.getWidth()), sh = Math.max(1, s.getHeight());
-        int mx = Math.max(2, (sw * 8) / 100), my = Math.max(2, (sh * 10) / 100);
+        int mx = Math.max(2, (sw * 12) / 100), my = Math.max(2, (sh * 14) / 100);
         int iw = Math.max(4, sw - mx * 2), ih = Math.max(4, sh - my * 2);
         Bitmap inner = Bitmap.createBitmap(s, Math.min(mx, sw - 4), Math.min(my, sh - 4), iw, ih);
         float sc = Math.max(2.5f, Math.min(4.5f, 160f / Math.max(1, ih)));
@@ -149,7 +170,6 @@ public class OcrHelper {
         return out;
     }
 
-    // 48x12 grayscale fingerprint of the 4-number history strip right next to Slot #1
     public static int[] stripThumb(Bitmap full, int x, int y, int w, int h) {
         int cols = 48, rows = 12;
         int[] t = new int[cols * rows];
