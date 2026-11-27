@@ -50,7 +50,7 @@ public class FloatingOverlayService extends Service {
 
     private static final String CH_ID = "magic_spin_overlay_channel";
     private static final int NOTIF_ID = 4109;
-    private static final long OCR_MS = 500L, LOCK_MS = 22000L;
+    private static final long OCR_MS = 600L, LOCK_MS = 15000L;
     private static final Object Q_LOCK = new Object();
 
     public static class PendingActions {
@@ -135,8 +135,10 @@ public class FloatingOverlayService extends Service {
     private final AtomicBoolean busy = new AtomicBoolean(false);
     private volatile long ocrMs = 0L;
 
+    // 4-Number History Strip Fingerprint (eliminates double numbers AND catches true repeats!)
+    private int[] lastSubStrip = null, prevFrameStrip = null;
     private Integer cand = null, lastOcr = null, selNum = null;
-    private int stCnt = 0, blCnt = 0, lastS2Col = OcrHelper.COL_NONE, curPat = 1, curMult = 1, curStepsRem = 0, curUnit = 0;
+    private int stCnt = 0, blCnt = 0, curPat = 1, curMult = 1, curStepsRem = 0, curUnit = 0;
     private boolean longBlank = false, curPlay = false, lastSpinWasHit = false;
     private long lastSubMs = 0L;
     private String ocrTxt = "MANUAL";
@@ -258,7 +260,8 @@ public class FloatingOverlayService extends Service {
         capTh = new HandlerThread("MagicOcr"); capTh.start(); capHdl = new Handler(capTh.getLooper());
         proj.registerCallback(new MediaProjection.Callback() { @Override public void onStop() { uiHdl.post(() -> { stopCap(); updateUI(); }); } }, capHdl);
         DisplayMetrics dm = realDm(); setDisp(dm.widthPixels, dm.heightPixels, dm.densityDpi);
-        capOn = true; autoScan = true; ocrTxt = "READY"; cand = null; stCnt = 0; blCnt = 0; longBlank = false; lastS2Col = OcrHelper.COL_NONE; busy.set(false);
+        capOn = true; autoScan = true; ocrTxt = "READY"; cand = null; stCnt = 0; blCnt = 0; longBlank = false;
+        lastSubStrip = null; prevFrameStrip = null; busy.set(false);
         bcastCap(); updateUI(); tick();
     }
 
@@ -306,53 +309,80 @@ public class FloatingOverlayService extends Service {
             int ins = dp(4), cx = Math.max(0, Math.min(iw - 4, Math.round((boxSX + ins) * sx))), cy = Math.max(0, Math.min(ih - 4, Math.round((boxSY + ins) * sy)));
             int cw = Math.max(4, Math.min(iw - cx, Math.round((boxSW - ins * 2) * sx))), ch = Math.max(4, Math.min(ih - cy, Math.round((boxSH - ins * 2) * sy)));
 
-            int s2x = cx + cw + Math.max(4, cw / 5), s2c = OcrHelper.COL_NONE;
-            if (s2x + cw < iw) { Bitmap b2 = Bitmap.createBitmap(full, s2x, cy, cw, ch); s2c = OcrHelper.badgeCol(b2); b2.recycle(); }
-            final int fs2 = s2c;
+            // Capture 4-number history strip to the right of Slot #1 for rock-solid repeat detection
+            int sx0 = cx + cw + Math.max(6, cw / 6);
+            int sw = Math.min(cw * 4, iw - sx0);
+            final int[] curStrip = (sw >= cw * 2) ? OcrHelper.stripThumb(full, sx0, cy, sw, ch) : null;
+
             Bitmap crop = Bitmap.createBitmap(full, cx, cy, cw, ch); full.recycle();
 
             final Bitmap mp = Bitmap.createScaledBitmap(crop, 72, 52, true);
             uiHdl.post(() -> { if (previewImg != null) previewImg.setImageBitmap(mp); if (lastPrevBmp != null && !lastPrevBmp.isRecycled()) lastPrevBmp.recycle(); lastPrevBmp = mp; });
 
             final int col = OcrHelper.badgeCol(crop);
-            if (col == OcrHelper.COL_NONE) { crop.recycle(); uiHdl.post(() -> onOcr(null, OcrHelper.COL_NONE, fs2)); return; }
+            if (col == OcrHelper.COL_NONE) { crop.recycle(); uiHdl.post(() -> onOcr(null, OcrHelper.COL_NONE, curStrip)); return; }
 
             final boolean[] hints = new boolean[]{false, false};
             final Bitmap bw = OcrHelper.cleanWhiteDigits(crop, hints);
-            if (col == OcrHelper.COL_GRN && hints[1]) { bw.recycle(); crop.recycle(); uiHdl.post(() -> onOcr(0, OcrHelper.COL_GRN, fs2)); return; }
+            if (col == OcrHelper.COL_GRN && hints[1]) { bw.recycle(); crop.recycle(); uiHdl.post(() -> onOcr(0, OcrHelper.COL_GRN, curStrip)); return; }
             final Bitmap rp = OcrHelper.padCol(crop); crop.recycle();
 
             busy.set(true); ocrMs = System.currentTimeMillis();
             ocr.process(InputImage.fromBitmap(bw, 0)).addOnSuccessListener(v1 -> {
                 Integer d1 = OcrHelper.parseNum(v1.getText(), col);
-                if (d1 != null) { bw.recycle(); rp.recycle(); uiHdl.post(() -> { onOcr(d1, col, fs2); busy.set(false); }); }
+                if (d1 != null) { bw.recycle(); rp.recycle(); uiHdl.post(() -> { onOcr(d1, col, curStrip); busy.set(false); }); }
                 else {
                     bw.recycle();
                     ocr.process(InputImage.fromBitmap(rp, 0)).addOnSuccessListener(v2 -> {
                         Integer d2 = OcrHelper.parseNum(v2.getText(), col);
                         if (d2 == null && col == OcrHelper.COL_RED && hints[0]) d2 = 1;
-                        final Integer fd = d2; uiHdl.post(() -> { onOcr(fd, col, fs2); busy.set(false); });
+                        final Integer fd = d2; uiHdl.post(() -> { onOcr(fd, col, curStrip); busy.set(false); });
                     }).addOnFailureListener(e -> busy.set(false)).addOnCompleteListener(t -> rp.recycle());
                 }
             }).addOnFailureListener(e -> { bw.recycle(); rp.recycle(); busy.set(false); });
         } catch (Exception e) { if (img != null) { try { img.close(); } catch (Exception ignored) {} } busy.set(false); }
     }
 
-    private void onOcr(Integer det, int col, int s2c) {
+    private void onOcr(Integer det, int col, int[] curStrip) {
         if (!autoScan) return;
         if (lastOcr != null && System.currentTimeMillis() - lastSubMs < LOCK_MS) return;
-        if (det == null) { cand = null; stCnt = 0; if (++blCnt >= 10) longBlank = true; ocrTxt = OcrHelper.cTag(col) + ": --"; updateUI(); return; }
+
+        // Check if the 4-number history bar to the right is static AND shifted permanently from last spin!
+        boolean stripStatic = (curStrip != null && prevFrameStrip != null && OcrHelper.thumbDiff(curStrip, prevFrameStrip) < 5);
+        int stripDiff = (curStrip != null && lastSubStrip != null) ? OcrHelper.thumbDiff(curStrip, lastSubStrip) : 0;
+        boolean stripShifted = (stripStatic && stripDiff >= 10);
+        prevFrameStrip = curStrip;
+
+        if (det == null) {
+            cand = null; stCnt = 0;
+            if (++blCnt >= 10) longBlank = true;
+            ocrTxt = OcrHelper.cTag(col) + ": --"; updateUI(); return;
+        }
         blCnt = 0;
-        boolean s2Shift = lastS2Col != OcrHelper.COL_NONE && s2c != OcrHelper.COL_NONE && s2c != lastS2Col;
-        if (lastOcr != null && lastOcr.equals(det) && !longBlank && !s2Shift) { cand = null; stCnt = 0; ocrTxt = OcrHelper.cTag(col) + " HOLD:" + det; updateUI(); return; }
+
+        // Same number sitting in Slot #1 & History Strip did NOT shift -> STRICT HOLD (zero double!)
+        if (lastOcr != null && lastOcr.equals(det) && !longBlank && !stripShifted) {
+            cand = null; stCnt = 0;
+            ocrTxt = OcrHelper.cTag(col) + " HOLD:" + det;
+            updateUI(); return;
+        }
+
         if (cand != null && cand.equals(det)) stCnt++; else { cand = det; stCnt = 1; }
-        if (stCnt >= 2) { cand = null; stCnt = 0; lastS2Col = s2c; ocrTxt = OcrHelper.cTag(col) + " ADD:" + det; submitSpin(det, "ocr"); return; }
-        ocrTxt = OcrHelper.cTag(col) + " " + det + " (" + stCnt + "/2)"; updateUI();
+        if (stCnt >= 2) {
+            cand = null; stCnt = 0;
+            lastSubStrip = curStrip;
+            ocrTxt = OcrHelper.cTag(col) + " ADD:" + det;
+            submitSpin(det, "ocr");
+            return;
+        }
+        ocrTxt = OcrHelper.cTag(col) + " " + det + " (" + stCnt + "/2)";
+        updateUI();
     }
 
     private void submitSpin(int num, String src) {
         if (num < 0 || num > 36) return;
         lastOcr = num; lastSubMs = System.currentTimeMillis(); longBlank = false; blCnt = 0; cand = null; stCnt = 0;
+        if (!"ocr".equals(src) && prevFrameStrip != null) lastSubStrip = prevFrameStrip;
         int prevM = curMult, prevRem = curStepsRem;
         appendPendingSpinSync(this, num);
         recalc(); loadLast5();
@@ -362,15 +392,10 @@ public class FloatingOverlayService extends Service {
         boolean enter8x = (prevM != 8 && curMult == 8);
         boolean sirenTriggered = false;
         if (enter32x2nd) {
-            sirenTriggered = true;
-            SirenPlayer.start32x(this);
+            sirenTriggered = true; SirenPlayer.start32x(this);
             Toast.makeText(this, "Aaj aapka din achha nahi hai, kal se fir koshish karein", Toast.LENGTH_LONG).show();
-        } else if (enter8x) {
-            sirenTriggered = true;
-            SirenPlayer.start8x(this);
-        }
+        } else if (enter8x) { sirenTriggered = true; SirenPlayer.start8x(this); }
 
-        // Loud Stop-Loss & Target Profit Alarm + Voice Announcement
         SharedPreferences p = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
         int tp = p.getInt(KEY_TARGET_PROFIT, 0), sl = p.getInt(KEY_STOP_LOSS, 0);
         boolean goalTriggered = false;
@@ -384,19 +409,17 @@ public class FloatingOverlayService extends Service {
             SirenPlayer.playGoalChime(false);
             uiHdl.postDelayed(() -> speakAlert("Stop Loss Hit"), 1900L);
             Toast.makeText(this, "STOP-LOSS (-" + sl + "U) HIT! RUK JAIYE!", Toast.LENGTH_LONG).show();
-        } else if ((tp == 0 || curUnit < tp) && (sl == 0 || curUnit > -sl)) {
-            tpFired = false; slFired = false;
-        }
+        } else if ((tp == 0 || curUnit < tp) && (sl == 0 || curUnit > -sl)) { tpFired = false; slFired = false; }
 
         if (!sirenTriggered && !goalTriggered) speakNum(num);
-
         updateUI();
         sendBroadcast(new Intent(ACTION_NUMBER_SUBMITTED).setPackage(getPackageName()).putExtra(EXTRA_NUMBER, num).putExtra(EXTRA_SOURCE, src));
     }
 
     private void performUndo() {
         if (!undoLastSpinSync(this)) { Toast.makeText(this, "Undo ke liye koi spin nahi", Toast.LENGTH_SHORT).show(); return; }
-        recalc(); loadLast5(); lastOcr = l5Nums.isEmpty() ? null : l5Nums.get(0); lastSubMs = 0L; tpFired = false; slFired = false;
+        recalc(); loadLast5(); lastOcr = l5Nums.isEmpty() ? null : l5Nums.get(0);
+        lastSubMs = 0L; lastSubStrip = null; prevFrameStrip = null; tpFired = false; slFired = false;
         updateUI(); sendBroadcast(new Intent(ACTION_UNDO_REQUESTED).setPackage(getPackageName()));
         Toast.makeText(this, "UNDO -> " + curPat + "P | " + curMult + "X", Toast.LENGTH_SHORT).show();
     }
@@ -513,7 +536,6 @@ public class FloatingOverlayService extends Service {
         updateUI(); return b;
     }
 
-    // Compact Opened Pin Widget (192x238 in 123 mode, 212x288 in 0-36 mode!)
     private LinearLayout mkExpanded() {
         LinearLayout p = new LinearLayout(this); p.setOrientation(LinearLayout.VERTICAL);
         p.setLayoutParams(new FrameLayout.LayoutParams(-1, -1)); p.setBackground(bg("#0F172A", "#38BDF8", 2, 10)); p.setPadding(dp(4), dp(4), dp(4), dp(4));
@@ -559,13 +581,7 @@ public class FloatingOverlayService extends Service {
         LinearLayout.LayoutParams vlp = new LinearLayout.LayoutParams(0, dp(22), 1f); vlp.rightMargin = dp(2); voiceBtn.setLayoutParams(vlp);
         voiceBtn.setOnClickListener(v -> { voiceOn = !voiceOn; getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit().putBoolean("voiceOn", voiceOn).apply(); if (!voiceOn && tts != null) { try { tts.stop(); } catch (Exception ignored) {} } updateUI(); });
         modeBtn = mkBtn("0-36", "#4F46E5", "#818CF8", 0, dp(22)); modeBtn.setTextSize(7.5f); modeBtn.setLayoutParams(new LinearLayout.LayoutParams(0, dp(22), 1f));
-        modeBtn.setOnClickListener(v -> {
-            showGrid36 = !showGrid36;
-            numPadView.setVisibility(showGrid36 ? View.GONE : View.VISIBLE);
-            grid36View.setVisibility(showGrid36 ? View.VISIBLE : View.GONE);
-            modeBtn.setText(showGrid36 ? "123" : "0-36");
-            applyWinSize();
-        });
+        modeBtn.setOnClickListener(v -> { showGrid36 = !showGrid36; numPadView.setVisibility(showGrid36 ? View.GONE : View.VISIBLE); grid36View.setVisibility(showGrid36 ? View.VISIBLE : View.GONE); modeBtn.setText(showGrid36 ? "123" : "0-36"); applyWinSize(); });
         row.addView(scanBtn); row.addView(lockBtn); row.addView(voiceBtn); row.addView(modeBtn); p.addView(row);
 
         expInfo = mkTxt(9f); expInfo.setTextColor(Color.parseColor("#F8FAFC")); expInfo.setBackground(bg("#1E293B", "#334155", 1, 5));
