@@ -118,7 +118,7 @@ public class FloatingOverlayService extends Service {
     private ImageView previewImg;
     private Bitmap lastPrevBmp = null;
     private TextToSpeech tts;
-    private boolean ttsReady = false, voiceOn = true, tpFired = false, slFired = false, showGrid36 = false;
+    private boolean ttsReady = false, voiceOn = true, tpFired = false, slFired = false, showGrid36 = false, isExpanded = false;
     private String typedSpin = "";
     private int blinkTone = 0, blinkStepsLeft = 0;
 
@@ -172,6 +172,10 @@ public class FloatingOverlayService extends Service {
 
     private void speakNum(int num) {
         if (voiceOn && tts != null && ttsReady) { try { tts.speak(String.valueOf(num), TextToSpeech.QUEUE_FLUSH, null, "n_" + num); } catch (Exception ignored) {} }
+    }
+
+    private void speakAlert(String msg) {
+        if (tts != null && ttsReady) { try { tts.speak(msg, TextToSpeech.QUEUE_FLUSH, null, "alrt"); } catch (Exception ignored) {} }
     }
 
     private void startResultBlink(boolean isHit) { blinkTone = isHit ? 1 : 2; blinkStepsLeft = 6; runBlinkStep(); }
@@ -356,17 +360,35 @@ public class FloatingOverlayService extends Service {
 
         boolean enter32x2nd = (curMult == 32 && curStepsRem == 1 && !(prevM == 32 && prevRem == 1));
         boolean enter8x = (prevM != 8 && curMult == 8);
+        boolean sirenTriggered = false;
         if (enter32x2nd) {
+            sirenTriggered = true;
             SirenPlayer.start32x(this);
             Toast.makeText(this, "Aaj aapka din achha nahi hai, kal se fir koshish karein", Toast.LENGTH_LONG).show();
-        } else if (enter8x) SirenPlayer.start8x(this);
-        else speakNum(num);
+        } else if (enter8x) {
+            sirenTriggered = true;
+            SirenPlayer.start8x(this);
+        }
 
+        // Loud Stop-Loss & Target Profit Alarm + Voice Announcement
         SharedPreferences p = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
         int tp = p.getInt(KEY_TARGET_PROFIT, 0), sl = p.getInt(KEY_STOP_LOSS, 0);
-        if (tp > 0 && curUnit >= tp && !tpFired) { tpFired = true; SirenPlayer.playGoalChime(true); Toast.makeText(this, "TARGET PROFIT (+" + tp + "U) COMPLETE!", Toast.LENGTH_LONG).show(); }
-        else if (sl > 0 && curUnit <= -sl && !slFired) { slFired = true; SirenPlayer.playGoalChime(false); Toast.makeText(this, "STOP-LOSS (-" + sl + "U) HIT!", Toast.LENGTH_LONG).show(); }
-        else if ((tp == 0 || curUnit < tp) && (sl == 0 || curUnit > -sl)) { tpFired = false; slFired = false; }
+        boolean goalTriggered = false;
+        if (tp > 0 && curUnit >= tp && !tpFired) {
+            tpFired = true; goalTriggered = true; ocrTxt = "TARGET HIT!";
+            SirenPlayer.playGoalChime(true);
+            uiHdl.postDelayed(() -> speakAlert("Target Profit Complete"), 1500L);
+            Toast.makeText(this, "TARGET PROFIT (+" + tp + "U) COMPLETE!", Toast.LENGTH_LONG).show();
+        } else if (sl > 0 && curUnit <= -sl && !slFired) {
+            slFired = true; goalTriggered = true; ocrTxt = "STOP LOSS HIT!";
+            SirenPlayer.playGoalChime(false);
+            uiHdl.postDelayed(() -> speakAlert("Stop Loss Hit"), 1900L);
+            Toast.makeText(this, "STOP-LOSS (-" + sl + "U) HIT! RUK JAIYE!", Toast.LENGTH_LONG).show();
+        } else if ((tp == 0 || curUnit < tp) && (sl == 0 || curUnit > -sl)) {
+            tpFired = false; slFired = false;
+        }
+
+        if (!sirenTriggered && !goalTriggered) speakNum(num);
 
         updateUI();
         sendBroadcast(new Intent(ACTION_NUMBER_SUBMITTED).setPackage(getPackageName()).putExtra(EXTRA_NUMBER, num).putExtra(EXTRA_SOURCE, src));
@@ -376,7 +398,7 @@ public class FloatingOverlayService extends Service {
         if (!undoLastSpinSync(this)) { Toast.makeText(this, "Undo ke liye koi spin nahi", Toast.LENGTH_SHORT).show(); return; }
         recalc(); loadLast5(); lastOcr = l5Nums.isEmpty() ? null : l5Nums.get(0); lastSubMs = 0L; tpFired = false; slFired = false;
         updateUI(); sendBroadcast(new Intent(ACTION_UNDO_REQUESTED).setPackage(getPackageName()));
-        Toast.makeText(this, "UNDO Done -> " + curPat + "P | " + curMult + "X", Toast.LENGTH_SHORT).show();
+        Toast.makeText(this, "UNDO -> " + curPat + "P | " + curMult + "X", Toast.LENGTH_SHORT).show();
     }
 
     private void recalc() {
@@ -453,7 +475,7 @@ public class FloatingOverlayService extends Service {
     private void mkOvl() {
         wm = (WindowManager) getSystemService(WINDOW_SERVICE); if (wm == null) return;
         SharedPreferences p = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
-        params = new WindowManager.LayoutParams(dp(156), dp(114), winType(), WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN, PixelFormat.TRANSLUCENT);
+        params = new WindowManager.LayoutParams(dp(152), dp(108), winType(), WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN, PixelFormat.TRANSLUCENT);
         params.gravity = Gravity.TOP | Gravity.START; params.x = p.getInt("pill_x", dp(14)); params.y = p.getInt("pill_y", dp(90));
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) params.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
         root = new FrameLayout(this); pillView = mkSquarePill(); expandedView = mkExpanded(); expandedView.setVisibility(View.GONE);
@@ -462,24 +484,24 @@ public class FloatingOverlayService extends Service {
 
     private LinearLayout mkSquarePill() {
         LinearLayout b = new LinearLayout(this); b.setOrientation(LinearLayout.VERTICAL); b.setGravity(Gravity.CENTER_HORIZONTAL);
-        b.setLayoutParams(new FrameLayout.LayoutParams(dp(156), dp(114))); b.setPadding(dp(6), dp(5), dp(6), dp(5));
-        pillHead = mkTxt(9f); pillInfo = mkTxt(14f); pillInfo.setTextColor(Color.parseColor("#F8FAFC"));
+        b.setLayoutParams(new FrameLayout.LayoutParams(dp(152), dp(108))); b.setPadding(dp(5), dp(4), dp(5), dp(4));
+        pillHead = mkTxt(9f); pillInfo = mkTxt(13.5f); pillInfo.setTextColor(Color.parseColor("#F8FAFC"));
 
         LinearLayout mid = new LinearLayout(this); mid.setOrientation(LinearLayout.HORIZONTAL); mid.setGravity(Gravity.CENTER_VERTICAL);
-        LinearLayout.LayoutParams mlp = new LinearLayout.LayoutParams(-1, dp(24)); mlp.topMargin = dp(2); mid.setLayoutParams(mlp);
+        LinearLayout.LayoutParams mlp = new LinearLayout.LayoutParams(-1, dp(22)); mlp.topMargin = dp(2); mid.setLayoutParams(mlp);
         pillOcr = mkTxt(8.5f); pillOcr.setLayoutParams(new LinearLayout.LayoutParams(0, -2, 1f));
-        Button rb = mkBtn("R", "#0284C7", "#38BDF8", dp(24), dp(22)); rb.setTextSize(9f);
+        Button rb = mkBtn("R", "#0284C7", "#38BDF8", dp(24), dp(20)); rb.setTextSize(9f);
         rb.setOnClickListener(v -> { if (lastOcr != null) submitSpin(lastOcr, "manual"); else Toast.makeText(this, "Koi last number nahi", Toast.LENGTH_SHORT).show(); });
         mid.addView(pillOcr); mid.addView(rb);
 
         View div = new View(this); div.setBackgroundColor(Color.parseColor("#334155"));
-        LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(-1, dp(1)); dlp.topMargin = dp(3); dlp.bottomMargin = dp(4); div.setLayoutParams(dlp);
+        LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(-1, dp(1)); dlp.topMargin = dp(3); dlp.bottomMargin = dp(3); div.setLayoutParams(dlp);
 
         LinearLayout l5Row = new LinearLayout(this); l5Row.setOrientation(LinearLayout.HORIZONTAL); l5Row.setGravity(Gravity.CENTER);
-        l5Row.setLayoutParams(new LinearLayout.LayoutParams(-1, dp(24)));
+        l5Row.setLayoutParams(new LinearLayout.LayoutParams(-1, dp(22)));
         for (int i = 0; i < 5; i++) {
-            TextView tv = mkTxt(9.5f); tv.setText("-"); tv.setTextColor(Color.WHITE);
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(22), 1f); if (i > 0) lp.leftMargin = dp(2);
+            TextView tv = mkTxt(9f); tv.setText("-"); tv.setTextColor(Color.WHITE);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(20), 1f); if (i > 0) lp.leftMargin = dp(2);
             tv.setLayoutParams(lp); tv.setBackground(bg("#1E293B", "#334155", 1, 4));
             l5Views[i] = tv; l5Row.addView(tv);
         }
@@ -491,56 +513,63 @@ public class FloatingOverlayService extends Service {
         updateUI(); return b;
     }
 
+    // Compact Opened Pin Widget (192x238 in 123 mode, 212x288 in 0-36 mode!)
     private LinearLayout mkExpanded() {
         LinearLayout p = new LinearLayout(this); p.setOrientation(LinearLayout.VERTICAL);
-        p.setLayoutParams(new FrameLayout.LayoutParams(dp(234), dp(374))); p.setBackground(bg("#0F172A", "#38BDF8", 2, 12)); p.setPadding(dp(5), dp(5), dp(5), dp(5));
+        p.setLayoutParams(new FrameLayout.LayoutParams(-1, -1)); p.setBackground(bg("#0F172A", "#38BDF8", 2, 10)); p.setPadding(dp(4), dp(4), dp(4), dp(4));
 
         LinearLayout top = new LinearLayout(this); top.setOrientation(LinearLayout.HORIZONTAL); top.setGravity(Gravity.CENTER_VERTICAL);
-        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(-1, dp(30)); tlp.bottomMargin = dp(3); top.setLayoutParams(tlp);
-        Button col = mkBtn("-", "#334155", "#475569", dp(24), dp(28)); col.setOnClickListener(v -> setExp(false));
+        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(-1, dp(26)); tlp.bottomMargin = dp(2); top.setLayoutParams(tlp);
+        Button col = mkBtn("-", "#334155", "#475569", dp(22), dp(24)); col.setOnClickListener(v -> setExp(false));
         previewImg = new ImageView(this); previewImg.setScaleType(ImageView.ScaleType.FIT_CENTER); previewImg.setBackground(bg("#000000", "#22C55E", 1, 4));
-        LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(dp(34), dp(28)); plp.leftMargin = dp(2); previewImg.setLayoutParams(plp);
-        selText = mkTxt(11f); selText.setText("SPIN: --"); selText.setTextColor(Color.parseColor("#FACC15")); selText.setBackground(bg("#080D17", "#38BDF8", 1, 5));
-        LinearLayout.LayoutParams stlp = new LinearLayout.LayoutParams(0, dp(28), 1f); stlp.leftMargin = dp(3); stlp.rightMargin = dp(3); selText.setLayoutParams(stlp);
-        Button undo = mkBtn("UNDO", "#B45309", "#F59E0B", dp(36), dp(28)); undo.setTextSize(8f);
-        LinearLayout.LayoutParams ulp = new LinearLayout.LayoutParams(dp(36), dp(28)); ulp.rightMargin = dp(2); undo.setLayoutParams(ulp);
+        LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(dp(28), dp(24)); plp.leftMargin = dp(2); previewImg.setLayoutParams(plp);
+        selText = mkTxt(10f); selText.setText("--"); selText.setTextColor(Color.parseColor("#FACC15")); selText.setBackground(bg("#080D17", "#38BDF8", 1, 4));
+        LinearLayout.LayoutParams stlp = new LinearLayout.LayoutParams(0, dp(24), 1f); stlp.leftMargin = dp(2); stlp.rightMargin = dp(2); selText.setLayoutParams(stlp);
+        Button undo = mkBtn("U", "#B45309", "#F59E0B", dp(26), dp(24)); undo.setTextSize(8.5f);
+        LinearLayout.LayoutParams ulp = new LinearLayout.LayoutParams(dp(26), dp(24)); ulp.rightMargin = dp(2); undo.setLayoutParams(ulp);
         undo.setOnClickListener(v -> performUndo());
-        Button go = mkBtn("GO", "#22C55E", "#16A34A", dp(36), dp(28)); go.setTextColor(Color.parseColor("#052E16"));
+        Button go = mkBtn("GO", "#22C55E", "#16A34A", dp(30), dp(24)); go.setTextColor(Color.parseColor("#052E16")); go.setTextSize(9f);
         go.setOnClickListener(v -> {
             Integer val = selNum;
             if (!typedSpin.isEmpty()) { try { val = Integer.parseInt(typedSpin); } catch (Exception ignored) { val = null; } }
-            if (val == null || val < 0 || val > 36) { Toast.makeText(this, "0 se 36 ke beech dalein", Toast.LENGTH_SHORT).show(); typedSpin = ""; selNum = null; selText.setText("SPIN: --"); return; }
-            submitSpin(val, "manual"); typedSpin = ""; selNum = null; selText.setText("SPIN: --");
+            if (val == null || val < 0 || val > 36) { Toast.makeText(this, "0-36 dalein", Toast.LENGTH_SHORT).show(); typedSpin = ""; selNum = null; selText.setText("--"); return; }
+            submitSpin(val, "manual"); typedSpin = ""; selNum = null; selText.setText("--");
         });
         top.addView(col); top.addView(previewImg); top.addView(selText); top.addView(undo); top.addView(go); p.addView(top);
 
-        msg32xTxt = new TextView(this); msg32xTxt.setText("Aaj aapka din achha nahi hai, kal se fir koshish karein");
-        msg32xTxt.setTextColor(Color.parseColor("#FEF08A")); msg32xTxt.setTextSize(9.5f); msg32xTxt.setTypeface(Typeface.DEFAULT_BOLD);
-        msg32xTxt.setGravity(Gravity.CENTER); msg32xTxt.setBackground(bg("#7F1D1D", "#FACC15", 1, 6)); msg32xTxt.setPadding(dp(4), dp(3), dp(4), dp(3));
-        LinearLayout.LayoutParams m32 = new LinearLayout.LayoutParams(-1, -2); m32.bottomMargin = dp(3); msg32xTxt.setLayoutParams(m32);
+        msg32xTxt = new TextView(this); msg32xTxt.setText("Aaj aapka din achha nahi, kal fir koshish karein");
+        msg32xTxt.setTextColor(Color.parseColor("#FEF08A")); msg32xTxt.setTextSize(8.5f); msg32xTxt.setTypeface(Typeface.DEFAULT_BOLD);
+        msg32xTxt.setGravity(Gravity.CENTER); msg32xTxt.setBackground(bg("#7F1D1D", "#FACC15", 1, 5)); msg32xTxt.setPadding(dp(3), dp(2), dp(3), dp(2));
+        LinearLayout.LayoutParams m32 = new LinearLayout.LayoutParams(-1, -2); m32.bottomMargin = dp(2); msg32xTxt.setLayoutParams(m32);
         msg32xTxt.setVisibility(View.GONE); p.addView(msg32xTxt);
 
-        sirenBtn = mkBtn("STOP SIREN (OFF)", "#DC2626", "#FCA5A5", -1, dp(26));
-        ((LinearLayout.LayoutParams) sirenBtn.getLayoutParams()).bottomMargin = dp(3); sirenBtn.setVisibility(View.GONE);
+        sirenBtn = mkBtn("STOP SIREN", "#DC2626", "#FCA5A5", -1, dp(22)); sirenBtn.setTextSize(8.5f);
+        ((LinearLayout.LayoutParams) sirenBtn.getLayoutParams()).bottomMargin = dp(2); sirenBtn.setVisibility(View.GONE);
         sirenBtn.setOnClickListener(v -> { SirenPlayer.stop(this); updateUI(); }); p.addView(sirenBtn);
 
         LinearLayout row = new LinearLayout(this); row.setOrientation(LinearLayout.HORIZONTAL);
-        LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(-1, dp(26)); rlp.bottomMargin = dp(3); row.setLayoutParams(rlp);
-        scanBtn = mkBtn("AUTO", "#334155", "#475569", 0, dp(26)); scanBtn.setTextSize(8f);
-        LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(0, dp(26), 1f); slp.rightMargin = dp(2); scanBtn.setLayoutParams(slp);
+        LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(-1, dp(22)); rlp.bottomMargin = dp(2); row.setLayoutParams(rlp);
+        scanBtn = mkBtn("AUTO", "#334155", "#475569", 0, dp(22)); scanBtn.setTextSize(7.5f);
+        LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(0, dp(22), 1f); slp.rightMargin = dp(2); scanBtn.setLayoutParams(slp);
         scanBtn.setOnClickListener(v -> { if (!capOn) { Toast.makeText(this, "App se START AUTO CAPTURE dabayein", Toast.LENGTH_SHORT).show(); return; } autoScan = !autoScan; ocrTxt = autoScan ? "READY" : "PAUSED"; bcastCap(); updateUI(); });
-        lockBtn = mkBtn("LOCK", "#334155", "#475569", 0, dp(26)); lockBtn.setTextSize(8f);
-        LinearLayout.LayoutParams llp = new LinearLayout.LayoutParams(0, dp(26), 1f); llp.rightMargin = dp(2); lockBtn.setLayoutParams(llp);
+        lockBtn = mkBtn("LOCK", "#334155", "#475569", 0, dp(22)); lockBtn.setTextSize(7.5f);
+        LinearLayout.LayoutParams llp = new LinearLayout.LayoutParams(0, dp(22), 1f); llp.rightMargin = dp(2); lockBtn.setLayoutParams(llp);
         lockBtn.setOnClickListener(v -> { if (!boxVis) mkBox(); else toggleLock(); });
-        voiceBtn = mkBtn("VOX", "#15803D", "#22C55E", 0, dp(26)); voiceBtn.setTextSize(8f);
-        LinearLayout.LayoutParams vlp = new LinearLayout.LayoutParams(0, dp(26), 1f); vlp.rightMargin = dp(2); voiceBtn.setLayoutParams(vlp);
+        voiceBtn = mkBtn("VOX", "#15803D", "#22C55E", 0, dp(22)); voiceBtn.setTextSize(7.5f);
+        LinearLayout.LayoutParams vlp = new LinearLayout.LayoutParams(0, dp(22), 1f); vlp.rightMargin = dp(2); voiceBtn.setLayoutParams(vlp);
         voiceBtn.setOnClickListener(v -> { voiceOn = !voiceOn; getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit().putBoolean("voiceOn", voiceOn).apply(); if (!voiceOn && tts != null) { try { tts.stop(); } catch (Exception ignored) {} } updateUI(); });
-        modeBtn = mkBtn("0-36", "#4F46E5", "#818CF8", 0, dp(26)); modeBtn.setTextSize(8f); modeBtn.setLayoutParams(new LinearLayout.LayoutParams(0, dp(26), 1f));
-        modeBtn.setOnClickListener(v -> { showGrid36 = !showGrid36; numPadView.setVisibility(showGrid36 ? View.GONE : View.VISIBLE); grid36View.setVisibility(showGrid36 ? View.VISIBLE : View.GONE); modeBtn.setText(showGrid36 ? "123" : "0-36"); });
+        modeBtn = mkBtn("0-36", "#4F46E5", "#818CF8", 0, dp(22)); modeBtn.setTextSize(7.5f); modeBtn.setLayoutParams(new LinearLayout.LayoutParams(0, dp(22), 1f));
+        modeBtn.setOnClickListener(v -> {
+            showGrid36 = !showGrid36;
+            numPadView.setVisibility(showGrid36 ? View.GONE : View.VISIBLE);
+            grid36View.setVisibility(showGrid36 ? View.VISIBLE : View.GONE);
+            modeBtn.setText(showGrid36 ? "123" : "0-36");
+            applyWinSize();
+        });
         row.addView(scanBtn); row.addView(lockBtn); row.addView(voiceBtn); row.addView(modeBtn); p.addView(row);
 
-        expInfo = mkTxt(10f); expInfo.setTextColor(Color.parseColor("#F8FAFC")); expInfo.setBackground(bg("#1E293B", "#334155", 1, 6));
-        LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(-1, dp(24)); ilp.bottomMargin = dp(3); expInfo.setLayoutParams(ilp); p.addView(expInfo);
+        expInfo = mkTxt(9f); expInfo.setTextColor(Color.parseColor("#F8FAFC")); expInfo.setBackground(bg("#1E293B", "#334155", 1, 5));
+        LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(-1, dp(20)); ilp.bottomMargin = dp(2); expInfo.setLayoutParams(ilp); p.addView(expInfo);
 
         FrameLayout area = new FrameLayout(this); area.setLayoutParams(new LinearLayout.LayoutParams(-1, 0, 1f));
         numPadView = mkNumPad(); grid36View = mkGrid36(); grid36View.setVisibility(View.GONE);
@@ -554,13 +583,13 @@ public class FloatingOverlayService extends Service {
         for (String[] r : rows) {
             LinearLayout lr = new LinearLayout(this); lr.setOrientation(LinearLayout.HORIZONTAL); lr.setLayoutParams(new LinearLayout.LayoutParams(-1, 0, 1f));
             for (String k : r) {
-                Button bt = mkBtn(k, "C".equals(k) ? "#7F1D1D" : ("<".equals(k) ? "#475569" : "#1E293B"), "#38BDF8", 0, -1); bt.setTextSize(15f);
-                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, -1, 1f); lp.setMargins(dp(2), dp(2), dp(2), dp(2)); bt.setLayoutParams(lp);
+                Button bt = mkBtn(k, "C".equals(k) ? "#7F1D1D" : ("<".equals(k) ? "#475569" : "#1E293B"), "#38BDF8", 0, -1); bt.setTextSize(13f);
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, -1, 1f); lp.setMargins(dp(1), dp(1), dp(1), dp(1)); bt.setLayoutParams(lp);
                 bt.setOnClickListener(v -> {
                     if ("C".equals(k)) { typedSpin = ""; selNum = null; }
                     else if ("<".equals(k)) { if (!typedSpin.isEmpty()) typedSpin = typedSpin.substring(0, typedSpin.length() - 1); selNum = null; }
                     else if (typedSpin.length() < 2) { typedSpin += k; selNum = null; }
-                    selText.setText(typedSpin.isEmpty() ? "SPIN: --" : "SPIN: " + typedSpin);
+                    selText.setText(typedSpin.isEmpty() ? "--" : typedSpin);
                 });
                 lr.addView(bt);
             }
@@ -571,13 +600,13 @@ public class FloatingOverlayService extends Service {
 
     private View mkGrid36() {
         GridLayout g = new GridLayout(this); g.setColumnCount(7); g.setRowCount(6); g.setLayoutParams(new FrameLayout.LayoutParams(-1, -1));
-        int cw = dp(30), ch = dp(30), m = dp(1);
+        int cw = dp(27), ch = dp(26), m = dp(1);
         for (int n = 0; n <= 36; n++) {
-            final int num = n; Button bt = mkBtn(String.valueOf(n), n == 0 ? "#15803D" : (OcrHelper.isRed(n) ? "#B91C1C" : "#1E293B"), "#334155", cw, ch);
+            final int num = n; Button bt = mkBtn(String.valueOf(n), n == 0 ? "#15803D" : (OcrHelper.isRed(n) ? "#B91C1C" : "#1E293B"), "#334155", cw, ch); bt.setTextSize(8.5f);
             GridLayout.LayoutParams glp = new GridLayout.LayoutParams(); glp.width = cw; glp.height = ch; glp.setMargins(m, m, m, m); bt.setLayoutParams(glp);
-            bt.setOnClickListener(v -> { selNum = num; typedSpin = String.valueOf(num); selText.setText("SPIN: " + num); }); g.addView(bt);
+            bt.setOnClickListener(v -> { selNum = num; typedSpin = String.valueOf(num); selText.setText(String.valueOf(num)); }); g.addView(bt);
         }
-        Button rep = mkBtn("R", "#0284C7", "#38BDF8", cw, ch);
+        Button rep = mkBtn("R", "#0284C7", "#38BDF8", cw, ch); rep.setTextSize(8.5f);
         GridLayout.LayoutParams rglp = new GridLayout.LayoutParams(); rglp.width = cw; rglp.height = ch; rglp.setMargins(m, m, m, m); rep.setLayoutParams(rglp);
         rep.setOnClickListener(v -> { if (lastOcr != null) submitSpin(lastOcr, "manual"); }); g.addView(rep);
         return g;
@@ -585,8 +614,8 @@ public class FloatingOverlayService extends Service {
 
     private TextView mkTxt(float sp) { TextView t = new TextView(this); t.setTextSize(sp); t.setTypeface(Typeface.DEFAULT_BOLD); t.setGravity(Gravity.CENTER); t.setMaxLines(1); return t; }
     private Button mkBtn(String txt, String f, String s, int w, int h) {
-        Button b = new Button(this); b.setText(txt); b.setTextColor(Color.WHITE); b.setTextSize(9.5f); b.setTypeface(Typeface.DEFAULT_BOLD);
-        b.setPadding(0, 0, 0, 0); b.setFocusable(false); b.setBackground(bg(f, s, 1, 5)); b.setLayoutParams(new LinearLayout.LayoutParams(w, h)); return b;
+        Button b = new Button(this); b.setText(txt); b.setTextColor(Color.WHITE); b.setTextSize(9f); b.setTypeface(Typeface.DEFAULT_BOLD);
+        b.setPadding(0, 0, 0, 0); b.setFocusable(false); b.setBackground(bg(f, s, 1, 4)); b.setLayoutParams(new LinearLayout.LayoutParams(w, h)); return b;
     }
 
     private void updateUI() {
@@ -596,11 +625,11 @@ public class FloatingOverlayService extends Service {
         String info = curPat + "P • BET " + curMult + "X", u = curUnit > 0 ? "+" + curUnit : String.valueOf(curUnit);
 
         if (pillView != null) {
-            if (flashOn && blinkTone == 1) pillView.setBackground(bg("#059669", "#86EFAC", 3, 12));
-            else if (flashOn && blinkTone == 2) pillView.setBackground(bg("#DC2626", "#FCA5A5", 3, 12));
-            else if (is32) pillView.setBackground(bg("#7F1D1D", "#FACC15", 3, 12));
-            else if (sir) pillView.setBackground(bg("#991B1B", "#FCA5A5", 2, 12));
-            else pillView.setBackground(curMult == 8 ? bg("#450A0A", "#EF4444", 2, 12) : bg(curPlay ? "#0B2922" : "#0F172A", curPlay ? "#22C55E" : "#38BDF8", 2, 12));
+            if (flashOn && blinkTone == 1) pillView.setBackground(bg("#059669", "#86EFAC", 3, 10));
+            else if (flashOn && blinkTone == 2) pillView.setBackground(bg("#DC2626", "#FCA5A5", 3, 10));
+            else if (is32) pillView.setBackground(bg("#7F1D1D", "#FACC15", 3, 10));
+            else if (sir) pillView.setBackground(bg("#991B1B", "#FCA5A5", 2, 10));
+            else pillView.setBackground(curMult == 8 ? bg("#450A0A", "#EF4444", 2, 10) : bg(curPlay ? "#0B2922" : "#0F172A", curPlay ? "#22C55E" : "#38BDF8", 2, 10));
         }
         if (pillHead != null) { pillHead.setText(is32 ? "32X (2ND)-TAP OFF" : (sir ? "8X SIREN-TAP OFF" : (mode + " | U:" + u))); pillHead.setTextColor(Color.parseColor(sir ? "#FEF08A" : (curMult == 8 ? "#FCA5A5" : (curPlay ? "#4ADE80" : "#38BDF8")))); }
         if (pillInfo != null) pillInfo.setText(info);
@@ -611,17 +640,23 @@ public class FloatingOverlayService extends Service {
             else { l5Views[i].setText("-"); l5Views[i].setBackground(bg("#1E293B", "#334155", 1, 4)); }
         }
         if (msg32xTxt != null) msg32xTxt.setVisibility(is32 ? View.VISIBLE : View.GONE);
-        if (sirenBtn != null) { sirenBtn.setVisibility(sir ? View.VISIBLE : View.GONE); sirenBtn.setText(is32 ? "STOP 32X SIREN (OFF)" : "STOP 8X SIREN (OFF)"); }
+        if (sirenBtn != null) { sirenBtn.setVisibility(sir ? View.VISIBLE : View.GONE); sirenBtn.setText(is32 ? "STOP 32X SIREN" : "STOP 8X SIREN"); }
         if (expInfo != null) expInfo.setText(ocrTxt + " | " + info + " | U:" + u);
-        if (scanBtn != null) { scanBtn.setText(autoScan ? "AUTO" : "OFF"); scanBtn.setBackground(bg(autoScan ? "#15803D" : "#334155", autoScan ? "#22C55E" : "#475569", 1, 5)); }
-        if (lockBtn != null) { lockBtn.setText(boxLock ? "UNLK" : "LOCK"); lockBtn.setBackground(bg(boxLock ? "#0369A1" : "#334155", boxLock ? "#38BDF8" : "#475569", 1, 5)); }
-        if (voiceBtn != null) { voiceBtn.setText(voiceOn ? "VOX" : "MUTE"); voiceBtn.setBackground(bg(voiceOn ? "#15803D" : "#334155", voiceOn ? "#22C55E" : "#475569", 1, 5)); }
+        if (scanBtn != null) { scanBtn.setText(autoScan ? "AUTO" : "OFF"); scanBtn.setBackground(bg(autoScan ? "#15803D" : "#334155", autoScan ? "#22C55E" : "#475569", 1, 4)); }
+        if (lockBtn != null) { lockBtn.setText(boxLock ? "UNLK" : "LOCK"); lockBtn.setBackground(bg(boxLock ? "#0369A1" : "#334155", boxLock ? "#38BDF8" : "#475569", 1, 4)); }
+        if (voiceBtn != null) { voiceBtn.setText(voiceOn ? "VOX" : "MUTE"); voiceBtn.setBackground(bg(voiceOn ? "#15803D" : "#334155", voiceOn ? "#22C55E" : "#475569", 1, 4)); }
     }
 
-    private void setExp(boolean ex) {
+    private void setExp(boolean ex) { isExpanded = ex; applyWinSize(); }
+
+    private void applyWinSize() {
         if (root == null || params == null || wm == null) return;
-        pillView.setVisibility(ex ? View.GONE : View.VISIBLE); expandedView.setVisibility(ex ? View.VISIBLE : View.GONE);
-        params.width = dp(ex ? 234 : 156); params.height = dp(ex ? 374 : 114); wm.updateViewLayout(root, params);
+        pillView.setVisibility(isExpanded ? View.GONE : View.VISIBLE);
+        expandedView.setVisibility(isExpanded ? View.VISIBLE : View.GONE);
+        if (!isExpanded) { params.width = dp(152); params.height = dp(108); }
+        else if (showGrid36) { params.width = dp(212); params.height = dp(288); }
+        else { params.width = dp(192); params.height = dp(238); }
+        wm.updateViewLayout(root, params);
     }
 
     private void addDrag(View v) {
