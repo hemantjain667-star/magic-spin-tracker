@@ -3,6 +3,10 @@ package com.hemantjain.magicspintracker;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
+import com.google.mlkit.vision.text.Text;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 
 public class OcrHelper {
     public static final int COL_NONE = 0, COL_RED = 1, COL_BLK = 2, COL_GRN = 3;
@@ -29,21 +33,22 @@ public class OcrHelper {
             for (int x = x0; x < x1; x += st) {
                 int c = b.getPixel(x, y);
                 int cr = Color.red(c), cg = Color.green(c), cb = Color.blue(c);
-                if (Math.min(cr, Math.min(cg, cb)) > 135) continue;
+                if (Math.min(cr, Math.min(cg, cb)) > 165) continue; // Ignore bright white digits
                 Color.RGBToHSV(cr, cg, cb, hsv);
                 t++;
                 boolean isGreenPx = (hsv[0] >= 70f && hsv[0] <= 185f && hsv[1] >= 0.18f && hsv[2] >= 0.12f)
                         || (cg > cr + 16 && cg > cb + 6 && cg > 45);
                 if (isGreenPx) g++;
-                else if ((hsv[0] <= 22f || hsv[0] >= 335f) && hsv[1] >= 0.32f && hsv[2] >= 0.18f) r++;
-                else if (hsv[2] <= 0.38f && hsv[1] <= 0.50f) k++;
+                else if ((hsv[0] <= 22f || hsv[0] >= 335f) && hsv[1] >= 0.30f && hsv[2] >= 0.18f) r++;
+                // Supports BOTH dark black AND grey-flashing black badges like [11] during blink!
+                else if ((hsv[2] <= 0.38f && hsv[1] <= 0.50f) || (hsv[2] <= 0.64f && hsv[1] <= 0.22f)) k++;
             }
         }
         if (t < 8) return COL_NONE;
         int rp = r * 100 / t, gp = g * 100 / t, kp = k * 100 / t;
         if (gp >= 10 && gp > rp) return COL_GRN;
         if (rp >= 24 && rp >= gp) return COL_RED;
-        if (kp >= 30) return COL_BLK;
+        if (kp >= 28) return COL_BLK;
         return COL_NONE;
     }
 
@@ -52,17 +57,9 @@ public class OcrHelper {
         String s = raw.replace("\n", " ").trim();
         if (s.isEmpty() || s.length() > 3 || s.matches(".*[:.,$%xX₹].*")) return null;
         s = s.replace(" ", "");
-
         if (col == COL_GRN) return 0;
         if (col == COL_BLK && (s.equals("0") || s.equalsIgnoreCase("O"))) return 0;
-
-        s = s.replace('O', '0').replace('o', '0').replace('D', '0').replace('Q', '0')
-                .replace('I', '1').replace('l', '1').replace('|', '1').replace('!', '1').replace('i', '1').replace(']', '1')
-                .replace('Z', '2').replace('z', '2')
-                .replace('S', '5').replace('s', '5')
-                .replace('G', '6').replace('b', '6')
-                .replace('B', '8');
-
+        s = cleanDigitChars(s);
         if (!s.matches("^[0-9]{1,2}$") || (s.length() == 2 && s.startsWith("0"))) return null;
         int v = Integer.parseInt(s);
         if (v == 0) return (col == COL_RED) ? null : 0;
@@ -72,7 +69,15 @@ public class OcrHelper {
         return v;
     }
 
-    // Smooth upscale + Row/Col Border-Line Auto-Eraser (100% removes Evolution's white outline!)
+    private static String cleanDigitChars(String s) {
+        return s.replace('O', '0').replace('o', '0').replace('D', '0').replace('Q', '0')
+                .replace('I', '1').replace('l', '1').replace('|', '1').replace('!', '1').replace('i', '1').replace(']', '1')
+                .replace('Z', '2').replace('z', '2')
+                .replace('S', '5').replace('s', '5')
+                .replace('G', '6').replace('b', '6')
+                .replace('B', '8');
+    }
+
     public static Bitmap cleanWhiteDigits(Bitmap s, boolean[] hints) {
         int sw = Math.max(1, s.getWidth()), sh = Math.max(1, s.getHeight());
         float sc = Math.max(2.5f, Math.min(5.0f, 160f / Math.max(1, sh)));
@@ -86,22 +91,17 @@ public class OcrHelper {
         boolean[] ink = new boolean[tw * th];
         for (int i = 0; i < px.length; i++) {
             int c = px[i];
-            ink[i] = Math.min(Color.red(c), Math.min(Color.green(c), Color.blue(c))) >= 125;
+            ink[i] = Math.min(Color.red(c), Math.min(Color.green(c), Color.blue(c))) >= 150;
         }
 
-        // 1. Erase horizontal border lines (any row with >58% white pixels = outline box line!)
         boolean[] eraseRow = new boolean[th];
         for (int y = 0; y < th; y++) {
             int cnt = 0;
             for (int x = 0; x < tw; x++) if (ink[y * tw + x]) cnt++;
             if (cnt * 100 / tw >= 58) {
-                for (int dy = -3; dy <= 3; dy++) {
-                    int ny = y + dy;
-                    if (ny >= 0 && ny < th) eraseRow[ny] = true;
-                }
+                for (int dy = -3; dy <= 3; dy++) { int ny = y + dy; if (ny >= 0 && ny < th) eraseRow[ny] = true; }
             }
         }
-        // 2. Erase vertical border lines near left/right edges (outer 24% columns with >55% height!)
         boolean[] eraseCol = new boolean[tw];
         int edgeLim = (tw * 24) / 100;
         for (int x = 0; x < tw; x++) {
@@ -109,21 +109,16 @@ public class OcrHelper {
             int cnt = 0;
             for (int y = 0; y < th; y++) if (ink[y * tw + x]) cnt++;
             if (cnt * 100 / th >= 55) {
-                for (int dx = -3; dx <= 3; dx++) {
-                    int nx = x + dx;
-                    if (nx >= 0 && nx < tw) eraseCol[nx] = true;
-                }
+                for (int dx = -3; dx <= 3; dx++) { int nx = x + dx; if (nx >= 0 && nx < tw) eraseCol[nx] = true; }
             }
         }
-        // Also clear outermost 4px rim
+
         int minX = tw, maxX = -1, minY = th, maxY = -1, darkCnt = 0;
         for (int y = 0; y < th; y++) {
             for (int x = 0; x < tw; x++) {
                 boolean rim = (x < 4 || x >= tw - 4 || y < 4 || y >= th - 4);
-                boolean keep = ink[y * tw + x] && !rim && !eraseRow[y] && !eraseCol[x];
-                if (keep) {
-                    px[y * tw + x] = Color.BLACK;
-                    darkCnt++;
+                if (ink[y * tw + x] && !rim && !eraseRow[y] && !eraseCol[x]) {
+                    px[y * tw + x] = Color.BLACK; darkCnt++;
                     if (x < minX) minX = x; if (x > maxX) maxX = x;
                     if (y < minY) minY = y; if (y > maxY) maxY = y;
                 } else {
@@ -132,23 +127,17 @@ public class OcrHelper {
             }
         }
 
-        if (darkCnt >= 120) {
-            hints[1] = true; // Clean digit inside badge (for Green 0!)
+        if (darkCnt >= 110) {
+            hints[1] = true;
             int dw = maxX - minX + 1, dh = maxY - minY + 1;
-            if (dh >= th / 4 && dw >= 5 && dw <= Math.round(dh * 0.48f)) {
-                hints[0] = true; // Clean narrow single-digit "1" (for Red 1!)
-            }
+            if (dh >= th / 4 && dw >= 5 && dw <= Math.round(dh * 0.48f)) hints[0] = true;
         }
 
         Bitmap bw = Bitmap.createBitmap(tw, th, Bitmap.Config.ARGB_8888);
         bw.setPixels(px, 0, tw, 0, 0, tw, th);
-
         int pad = 44;
         Bitmap out = Bitmap.createBitmap(tw + pad * 2, th + pad * 2, Bitmap.Config.ARGB_8888);
-        Canvas cv = new Canvas(out);
-        cv.drawColor(Color.WHITE);
-        cv.drawBitmap(bw, pad, pad, null);
-        bw.recycle();
+        Canvas cv = new Canvas(out); cv.drawColor(Color.WHITE); cv.drawBitmap(bw, pad, pad, null); bw.recycle();
         return out;
     }
 
@@ -160,36 +149,61 @@ public class OcrHelper {
         float sc = Math.max(2.5f, Math.min(4.5f, 160f / Math.max(1, ih)));
         int tw = Math.min(360, Math.round(iw * sc)), th = Math.min(260, Math.round(ih * sc));
         Bitmap up = Bitmap.createScaledBitmap(inner, tw, th, true);
-        int bg = inner.getPixel(iw / 4, ih / 4);
-        inner.recycle();
+        int bg = inner.getPixel(iw / 4, ih / 4); inner.recycle();
         Bitmap out = Bitmap.createBitmap(tw + 64, th + 64, Bitmap.Config.ARGB_8888);
-        Canvas cv = new Canvas(out);
-        cv.drawColor(bg);
-        cv.drawBitmap(up, 32, 32, null);
-        up.recycle();
+        Canvas cv = new Canvas(out); cv.drawColor(bg); cv.drawBitmap(up, 32, 32, null); up.recycle();
         return out;
     }
 
-    public static int[] stripThumb(Bitmap full, int x, int y, int w, int h) {
-        int cols = 48, rows = 12;
-        int[] t = new int[cols * rows];
-        if (w <= 0 || h <= 0) return t;
-        int fw = full.getWidth(), fh = full.getHeight();
-        for (int gy = 0; gy < rows; gy++) {
-            int py = Math.max(0, Math.min(fh - 1, y + (gy * h) / rows));
-            for (int gx = 0; gx < cols; gx++) {
-                int px = Math.max(0, Math.min(fw - 1, x + (gx * w) / cols));
-                int c = full.getPixel(px, py);
-                t[gy * cols + gx] = (int) (0.299 * Color.red(c) + 0.587 * Color.green(c) + 0.114 * Color.blue(c));
-            }
+    // Converts the black history strip (White + Red + Green numbers) to crisp Black-on-White for ML Kit!
+    public static Bitmap cleanHistoryStrip(Bitmap strip) {
+        int sw = Math.max(1, strip.getWidth()), sh = Math.max(1, strip.getHeight());
+        float sc = Math.max(2.0f, Math.min(3.5f, 110f / Math.max(1, sh)));
+        int tw = Math.min(720, Math.round(sw * sc)), th = Math.min(180, Math.round(sh * sc));
+        Bitmap up = Bitmap.createScaledBitmap(strip, tw, th, true);
+        int[] px = new int[tw * th];
+        up.getPixels(px, 0, tw, 0, 0, tw, th);
+        up.recycle();
+        for (int i = 0; i < px.length; i++) {
+            int c = px[i];
+            int maxCh = Math.max(Color.red(c), Math.max(Color.green(c), Color.blue(c)));
+            // Bright White (230), Bright Red (200), and Bright Green (160) digits all have maxCh >= 112!
+            px[i] = (maxCh >= 112) ? Color.BLACK : Color.WHITE;
         }
-        return t;
+        Bitmap bw = Bitmap.createBitmap(tw, th, Bitmap.Config.ARGB_8888);
+        bw.setPixels(px, 0, tw, 0, 0, tw, th);
+        int pad = 28;
+        Bitmap out = Bitmap.createBitmap(tw + pad * 2, th + pad * 2, Bitmap.Config.ARGB_8888);
+        Canvas cv = new Canvas(out); cv.drawColor(Color.WHITE); cv.drawBitmap(bw, pad, pad, null); bw.recycle();
+        return out;
     }
 
-    public static int thumbDiff(int[] a, int[] b) {
-        if (a == null || b == null || a.length != b.length) return 0;
-        long s = 0;
-        for (int i = 0; i < a.length; i++) s += Math.abs(a[i] - b[i]);
-        return (int) (s / a.length);
+    // Reads history strip numbers in exact left-to-right X order using ML Kit bounding boxes!
+    public static List<Integer> parseHistoryLeftToRight(Text visionText) {
+        List<Text.Element> elems = new ArrayList<>();
+        if (visionText != null) {
+            for (Text.TextBlock b : visionText.getTextBlocks()) {
+                for (Text.Line l : b.getLines()) {
+                    elems.addAll(l.getElements());
+                }
+            }
+        }
+        Collections.sort(elems, (a, b) -> {
+            int ax = a.getBoundingBox() != null ? a.getBoundingBox().left : 0;
+            int bx = b.getBoundingBox() != null ? b.getBoundingBox().left : 0;
+            return Integer.compare(ax, bx);
+        });
+        List<Integer> nums = new ArrayList<>();
+        for (Text.Element el : elems) {
+            String raw = el.getText();
+            if (raw == null) continue;
+            String s = cleanDigitChars(raw.trim());
+            if (s.matches("^[0-9]{1,2}$") && !(s.length() == 2 && s.startsWith("0"))) {
+                int v = Integer.parseInt(s);
+                if (v >= 0 && v <= 36) nums.add(v);
+            }
+            if (nums.size() >= 4) break;
+        }
+        return nums;
     }
 }
