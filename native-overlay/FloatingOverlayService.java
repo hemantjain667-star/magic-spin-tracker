@@ -50,7 +50,7 @@ public class FloatingOverlayService extends Service {
 
     private static final String CH_ID = "magic_spin_overlay_channel";
     private static final int NOTIF_ID = 4109;
-    private static final long OCR_MS = 600L, LOCK_MS = 15000L;
+    private static final long OCR_MS = 600L, LOCK_MS = 12000L;
     private static final Object Q_LOCK = new Object();
 
     public static class PendingActions {
@@ -127,7 +127,7 @@ public class FloatingOverlayService extends Service {
     private MediaProjection proj;
     private VirtualDisplay vDisp;
     private ImageReader reader;
-    private int capW = 0, capH = 0;
+    private int capW = 0, capH = 0, nullFrameCnt = 0;
     private TextRecognizer ocr;
     private HandlerThread capTh;
     private Handler capHdl;
@@ -135,7 +135,6 @@ public class FloatingOverlayService extends Service {
     private final AtomicBoolean busy = new AtomicBoolean(false);
     private volatile long ocrMs = 0L;
 
-    // 4-Number History Strip Fingerprint (eliminates double numbers AND catches true repeats!)
     private int[] lastSubStrip = null, prevFrameStrip = null;
     private Integer cand = null, lastOcr = null, selNum = null;
     private int stCnt = 0, blCnt = 0, curPat = 1, curMult = 1, curStepsRem = 0, curUnit = 0;
@@ -261,7 +260,7 @@ public class FloatingOverlayService extends Service {
         proj.registerCallback(new MediaProjection.Callback() { @Override public void onStop() { uiHdl.post(() -> { stopCap(); updateUI(); }); } }, capHdl);
         DisplayMetrics dm = realDm(); setDisp(dm.widthPixels, dm.heightPixels, dm.densityDpi);
         capOn = true; autoScan = true; ocrTxt = "READY"; cand = null; stCnt = 0; blCnt = 0; longBlank = false;
-        lastSubStrip = null; prevFrameStrip = null; busy.set(false);
+        nullFrameCnt = 0; lastSubStrip = null; prevFrameStrip = null; busy.set(false);
         bcastCap(); updateUI(); tick();
     }
 
@@ -299,7 +298,12 @@ public class FloatingOverlayService extends Service {
         if (reader == null) return;
         Image img = null;
         try {
-            img = reader.acquireLatestImage(); if (img == null) return;
+            img = reader.acquireLatestImage();
+            if (img == null) {
+                if (++nullFrameCnt >= 14) { uiHdl.post(() -> { ocrTxt = "CAP PAUSED!"; updateUI(); }); }
+                return;
+            }
+            nullFrameCnt = 0;
             int iw = img.getWidth(), ih = img.getHeight();
             Image.Plane pl = img.getPlanes()[0]; int ps = pl.getPixelStride(), pad = pl.getRowStride() - ps * iw;
             Bitmap full = Bitmap.createBitmap(iw + pad / ps, ih, Bitmap.Config.ARGB_8888);
@@ -309,9 +313,7 @@ public class FloatingOverlayService extends Service {
             int ins = dp(4), cx = Math.max(0, Math.min(iw - 4, Math.round((boxSX + ins) * sx))), cy = Math.max(0, Math.min(ih - 4, Math.round((boxSY + ins) * sy)));
             int cw = Math.max(4, Math.min(iw - cx, Math.round((boxSW - ins * 2) * sx))), ch = Math.max(4, Math.min(ih - cy, Math.round((boxSH - ins * 2) * sy)));
 
-            // Capture 4-number history strip to the right of Slot #1 for rock-solid repeat detection
-            int sx0 = cx + cw + Math.max(6, cw / 6);
-            int sw = Math.min(cw * 4, iw - sx0);
+            int sx0 = cx + cw + Math.max(6, cw / 6), sw = Math.min(cw * 4, iw - sx0);
             final int[] curStrip = (sw >= cw * 2) ? OcrHelper.stripThumb(full, sx0, cy, sw, ch) : null;
 
             Bitmap crop = Bitmap.createBitmap(full, cx, cy, cw, ch); full.recycle();
@@ -347,36 +349,21 @@ public class FloatingOverlayService extends Service {
         if (!autoScan) return;
         if (lastOcr != null && System.currentTimeMillis() - lastSubMs < LOCK_MS) return;
 
-        // Check if the 4-number history bar to the right is static AND shifted permanently from last spin!
         boolean stripStatic = (curStrip != null && prevFrameStrip != null && OcrHelper.thumbDiff(curStrip, prevFrameStrip) < 5);
         int stripDiff = (curStrip != null && lastSubStrip != null) ? OcrHelper.thumbDiff(curStrip, lastSubStrip) : 0;
         boolean stripShifted = (stripStatic && stripDiff >= 10);
         prevFrameStrip = curStrip;
 
-        if (det == null) {
-            cand = null; stCnt = 0;
-            if (++blCnt >= 10) longBlank = true;
-            ocrTxt = OcrHelper.cTag(col) + ": --"; updateUI(); return;
-        }
+        if (det == null) { cand = null; stCnt = 0; if (++blCnt >= 10) longBlank = true; ocrTxt = OcrHelper.cTag(col) + ": --"; updateUI(); return; }
         blCnt = 0;
 
-        // Same number sitting in Slot #1 & History Strip did NOT shift -> STRICT HOLD (zero double!)
         if (lastOcr != null && lastOcr.equals(det) && !longBlank && !stripShifted) {
-            cand = null; stCnt = 0;
-            ocrTxt = OcrHelper.cTag(col) + " HOLD:" + det;
-            updateUI(); return;
+            cand = null; stCnt = 0; ocrTxt = OcrHelper.cTag(col) + " HOLD:" + det; updateUI(); return;
         }
 
         if (cand != null && cand.equals(det)) stCnt++; else { cand = det; stCnt = 1; }
-        if (stCnt >= 2) {
-            cand = null; stCnt = 0;
-            lastSubStrip = curStrip;
-            ocrTxt = OcrHelper.cTag(col) + " ADD:" + det;
-            submitSpin(det, "ocr");
-            return;
-        }
-        ocrTxt = OcrHelper.cTag(col) + " " + det + " (" + stCnt + "/2)";
-        updateUI();
+        if (stCnt >= 2) { cand = null; stCnt = 0; lastSubStrip = curStrip; ocrTxt = OcrHelper.cTag(col) + " ADD:" + det; submitSpin(det, "ocr"); return; }
+        ocrTxt = OcrHelper.cTag(col) + " " + det + " (" + stCnt + "/2)"; updateUI();
     }
 
     private void submitSpin(int num, String src) {
