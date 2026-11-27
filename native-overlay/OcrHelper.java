@@ -22,7 +22,6 @@ public class OcrHelper {
         int w = b.getWidth(), h = b.getHeight(), r = 0, g = 0, k = 0, t = 0;
         int st = Math.max(1, Math.min(w, h) / 24);
         float[] hsv = new float[3];
-        // Sample inner center (avoids top header bar & white outline)
         int x0 = (w * 15) / 100, x1 = w - x0, y0 = (h * 20) / 100, y1 = h - y0;
         if (x1 <= x0) { x0 = 0; x1 = w; }
         if (y1 <= y0) { y0 = 0; y1 = h; }
@@ -30,21 +29,22 @@ public class OcrHelper {
             for (int x = x0; x < x1; x += st) {
                 int c = b.getPixel(x, y);
                 int cr = Color.red(c), cg = Color.green(c), cb = Color.blue(c);
+                // Ignore pure white digits
+                if (Math.min(cr, Math.min(cg, cb)) > 135) continue;
                 Color.RGBToHSV(cr, cg, cb, hsv);
-                if (hsv[2] > 0.68f && hsv[1] < 0.28f) continue; // Ignore white digit pixels
                 t++;
                 boolean isGreenPx = (hsv[0] >= 70f && hsv[0] <= 185f && hsv[1] >= 0.18f && hsv[2] >= 0.12f)
                         || (cg > cr + 16 && cg > cb + 6 && cg > 45);
                 if (isGreenPx) g++;
-                else if ((hsv[0] <= 22f || hsv[0] >= 335f) && hsv[1] >= 0.35f && hsv[2] >= 0.20f) r++;
+                else if ((hsv[0] <= 22f || hsv[0] >= 335f) && hsv[1] >= 0.32f && hsv[2] >= 0.18f) r++;
                 else if (hsv[2] <= 0.36f && hsv[1] <= 0.50f) k++;
             }
         }
         if (t < 8) return COL_NONE;
         int rp = r * 100 / t, gp = g * 100 / t, kp = k * 100 / t;
         if (gp >= 10 && gp > rp) return COL_GRN;
-        if (rp >= 25 && rp >= gp) return COL_RED;
-        if (kp >= 32) return COL_BLK;
+        if (rp >= 24 && rp >= gp) return COL_RED;
+        if (kp >= 30) return COL_BLK;
         return COL_NONE;
     }
 
@@ -54,14 +54,17 @@ public class OcrHelper {
         if (s.isEmpty() || s.length() > 3 || s.matches(".*[:.,$%xX₹].*")) return null;
         s = s.replace(" ", "");
 
-        // Green badge = always 0
         if (col == COL_GRN) return 0;
-
-        // Allow 0 / O even on dark/black badge (for dark-green 0 badges!)
         if (col == COL_BLK && (s.equals("0") || s.equalsIgnoreCase("O"))) return 0;
 
-        s = s.replace('O', '0').replace('o', '0')
-                .replace('I', '1').replace('l', '1').replace('|', '1').replace('!', '1');
+        // Smart single/double-digit OCR cleanup (strictly guarded by Red/Black color check!)
+        s = s.replace('O', '0').replace('o', '0').replace('D', '0').replace('Q', '0')
+                .replace('I', '1').replace('l', '1').replace('|', '1').replace('!', '1').replace('i', '1')
+                .replace('Z', '2').replace('z', '2')
+                .replace('S', '5').replace('s', '5')
+                .replace('G', '6').replace('b', '6')
+                .replace('B', '8');
+
         if (!s.matches("^[0-9]{1,2}$") || (s.length() == 2 && s.startsWith("0"))) return null;
         int v = Integer.parseInt(s);
         if (v == 0) return (col == COL_RED) ? null : 0;
@@ -71,79 +74,102 @@ public class OcrHelper {
         return v;
     }
 
+    // Smooth upscale FIRST + pure white digit isolation (zero jagged pixels, zero white-border noise!)
     public static Bitmap cleanWhiteDigits(Bitmap s, boolean[] hints) {
-        int w = s.getWidth(), h = s.getHeight();
-        boolean[] m = new boolean[w * h];
-        float[] hsv = new float[3];
-        for (int y = 0; y < h; y++) {
-            for (int x = 0; x < w; x++) {
-                int c = s.getPixel(x, y);
-                Color.RGBToHSV(Color.red(c), Color.green(c), Color.blue(c), hsv);
-                if (hsv[2] >= 0.58f && hsv[1] <= 0.36f) m[y * w + x] = true;
-            }
-        }
-        boolean[] cl = m.clone();
-        int[] q = new int[w * h];
-        int hd = 0, tl = 0;
-        for (int x = 0; x < w; x++) {
-            if (cl[x]) { cl[x] = false; q[tl++] = x; }
-            int b = (h - 1) * w + x;
-            if (cl[b]) { cl[b] = false; q[tl++] = b; }
-        }
-        for (int y = 1; y < h - 1; y++) {
-            int l = y * w, r = l + w - 1;
-            if (cl[l]) { cl[l] = false; q[tl++] = l; }
-            if (cl[r]) { cl[r] = false; q[tl++] = r; }
-        }
-        while (hd < tl) {
-            int idx = q[hd++], cx = idx % w, cy = idx / w;
-            if (cx > 0 && cl[idx - 1]) { cl[idx - 1] = false; q[tl++] = idx - 1; }
-            if (cx + 1 < w && cl[idx + 1]) { cl[idx + 1] = false; q[tl++] = idx + 1; }
-            if (cy > 0 && cl[idx - w]) { cl[idx - w] = false; q[tl++] = idx - w; }
-            if (cy + 1 < h && cl[idx + w]) { cl[idx + w] = false; q[tl++] = idx + w; }
-        }
-        int mx0 = w, mx1 = -1, my0 = h, my1 = -1, rem = 0;
-        for (int y = 0; y < h; y++) {
-            for (int x = 0; x < w; x++) {
-                if (cl[y * w + x]) {
-                    rem++;
-                    if (x < mx0) mx0 = x; if (x > mx1) mx1 = x;
-                    if (y < my0) my0 = y; if (y > my1) my1 = y;
+        int sw = Math.max(1, s.getWidth()), sh = Math.max(1, s.getHeight());
+        // Shave outer 8% left/right and 10% top/bottom to cleanly strip Evolution's white outline
+        int mx = Math.max(2, (sw * 8) / 100);
+        int my = Math.max(2, (sh * 10) / 100);
+        int iw = Math.max(4, sw - mx * 2), ih = Math.max(4, sh - my * 2);
+        Bitmap inner = Bitmap.createBitmap(s, Math.min(mx, sw - 4), Math.min(my, sh - 4), iw, ih);
+
+        // Smooth bilinear upscale to ~160px tall
+        float sc = Math.max(2.5f, Math.min(5.0f, 160f / Math.max(1, ih)));
+        int tw = Math.min(360, Math.round(iw * sc)), th = Math.min(260, Math.round(ih * sc));
+        Bitmap up = Bitmap.createScaledBitmap(inner, tw, th, true);
+        inner.recycle();
+
+        int[] px = new int[tw * th];
+        up.getPixels(px, 0, tw, 0, 0, tw, th);
+        up.recycle();
+
+        int minX = tw, maxX = -1, minY = th, maxY = -1, darkCnt = 0;
+        for (int y = 0; y < th; y++) {
+            for (int x = 0; x < tw; x++) {
+                int c = px[y * tw + x];
+                int r = Color.red(c), g = Color.green(c), b = Color.blue(c);
+                // White digit pixels have high R, G, AND B (Red/Green/Black/Gold backgrounds fail this!)
+                boolean isWhiteDigit = Math.min(r, Math.min(g, b)) >= 128;
+                if (isWhiteDigit) {
+                    px[y * tw + x] = Color.BLACK;
+                    darkCnt++;
+                    if (x < minX) minX = x; if (x > maxX) maxX = x;
+                    if (y < minY) minY = y; if (y > maxY) maxY = y;
+                } else {
+                    px[y * tw + x] = Color.WHITE;
                 }
             }
         }
-        boolean[] use = rem >= 6 ? cl : m;
-        if (rem >= 6) {
-            hints[1] = true;
-            int dw = mx1 - mx0 + 1, dh = my1 - my0 + 1;
-            if (dh >= Math.max(8, h / 3) && dw >= 2 && dw <= Math.round(dh * 0.45f)) hints[0] = true;
+
+        if (darkCnt >= 140) {
+            hints[1] = true; // Clear digit present inside badge (confirms Green 0!)
+            int dw = maxX - minX + 1, dh = maxY - minY + 1;
+            if (dh >= th / 3 && dw >= 6 && dw <= Math.round(dh * 0.44f)) {
+                hints[0] = true; // Thin vertical single digit "1" fallback
+            }
         }
-        int[] px = new int[w * h];
-        for (int i = 0; i < px.length; i++) px[i] = use[i] ? Color.BLACK : Color.WHITE;
-        Bitmap rb = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
-        rb.setPixels(px, 0, w, 0, 0, w, h);
-        float sc = Math.max(3f, Math.min(5f, 200f / Math.max(1, h)));
-        int tw = Math.min(440, Math.round(w * sc)), th = Math.min(440, Math.round(h * sc));
-        Bitmap up = Bitmap.createScaledBitmap(rb, tw, th, false);
-        rb.recycle();
-        Bitmap out = Bitmap.createBitmap(tw + 72, th + 72, Bitmap.Config.ARGB_8888);
+
+        Bitmap bw = Bitmap.createBitmap(tw, th, Bitmap.Config.ARGB_8888);
+        bw.setPixels(px, 0, tw, 0, 0, tw, th);
+
+        int pad = 44;
+        Bitmap out = Bitmap.createBitmap(tw + pad * 2, th + pad * 2, Bitmap.Config.ARGB_8888);
         Canvas cv = new Canvas(out);
         cv.drawColor(Color.WHITE);
-        cv.drawBitmap(up, 36, 36, null);
-        up.recycle();
+        cv.drawBitmap(bw, pad, pad, null);
+        bw.recycle();
         return out;
     }
 
     public static Bitmap padCol(Bitmap s) {
         int sw = Math.max(1, s.getWidth()), sh = Math.max(1, s.getHeight());
-        float sc = Math.max(2.5f, Math.min(4f, 180f / sh));
-        int tw = Math.min(400, Math.round(sw * sc)), th = Math.min(400, Math.round(sh * sc));
-        Bitmap up = Bitmap.createScaledBitmap(s, tw, th, true);
-        Bitmap out = Bitmap.createBitmap(tw + 56, th + 56, Bitmap.Config.ARGB_8888);
+        int mx = Math.max(2, (sw * 8) / 100), my = Math.max(2, (sh * 10) / 100);
+        int iw = Math.max(4, sw - mx * 2), ih = Math.max(4, sh - my * 2);
+        Bitmap inner = Bitmap.createBitmap(s, Math.min(mx, sw - 4), Math.min(my, sh - 4), iw, ih);
+        float sc = Math.max(2.5f, Math.min(4.5f, 160f / Math.max(1, ih)));
+        int tw = Math.min(360, Math.round(iw * sc)), th = Math.min(260, Math.round(ih * sc));
+        Bitmap up = Bitmap.createScaledBitmap(inner, tw, th, true);
+        int bg = inner.getPixel(iw / 4, ih / 4);
+        inner.recycle();
+        Bitmap out = Bitmap.createBitmap(tw + 64, th + 64, Bitmap.Config.ARGB_8888);
         Canvas cv = new Canvas(out);
-        cv.drawColor(s.getPixel(sw / 4, sh / 4));
-        cv.drawBitmap(up, 28, 28, null);
+        cv.drawColor(bg);
+        cv.drawBitmap(up, 32, 32, null);
         up.recycle();
         return out;
+    }
+
+    // 48x12 grayscale fingerprint of the 4-number history strip right next to Slot #1
+    public static int[] stripThumb(Bitmap full, int x, int y, int w, int h) {
+        int cols = 48, rows = 12;
+        int[] t = new int[cols * rows];
+        if (w <= 0 || h <= 0) return t;
+        int fw = full.getWidth(), fh = full.getHeight();
+        for (int gy = 0; gy < rows; gy++) {
+            int py = Math.max(0, Math.min(fh - 1, y + (gy * h) / rows));
+            for (int gx = 0; gx < cols; gx++) {
+                int px = Math.max(0, Math.min(fw - 1, x + (gx * w) / cols));
+                int c = full.getPixel(px, py);
+                t[gy * cols + gx] = (int) (0.299 * Color.red(c) + 0.587 * Color.green(c) + 0.114 * Color.blue(c));
+            }
+        }
+        return t;
+    }
+
+    public static int thumbDiff(int[] a, int[] b) {
+        if (a == null || b == null || a.length != b.length) return 0;
+        long s = 0;
+        for (int i = 0; i < a.length; i++) s += Math.abs(a[i] - b[i]);
+        return (int) (s / a.length);
     }
 }
