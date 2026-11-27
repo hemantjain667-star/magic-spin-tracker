@@ -22,23 +22,29 @@ public class OcrHelper {
         int w = b.getWidth(), h = b.getHeight(), r = 0, g = 0, k = 0, t = 0;
         int st = Math.max(1, Math.min(w, h) / 24);
         float[] hsv = new float[3];
-        int x0 = w / 10, x1 = w - x0, y0 = h / 10, y1 = h - y0;
+        // Sample inner center (avoids top header bar & white outline)
+        int x0 = (w * 15) / 100, x1 = w - x0, y0 = (h * 20) / 100, y1 = h - y0;
+        if (x1 <= x0) { x0 = 0; x1 = w; }
+        if (y1 <= y0) { y0 = 0; y1 = h; }
         for (int y = y0; y < y1; y += st) {
             for (int x = x0; x < x1; x += st) {
                 int c = b.getPixel(x, y);
-                Color.RGBToHSV(Color.red(c), Color.green(c), Color.blue(c), hsv);
-                if (hsv[2] > 0.68f && hsv[1] < 0.30f) continue;
+                int cr = Color.red(c), cg = Color.green(c), cb = Color.blue(c);
+                Color.RGBToHSV(cr, cg, cb, hsv);
+                if (hsv[2] > 0.68f && hsv[1] < 0.28f) continue; // Ignore white digit pixels
                 t++;
-                if ((hsv[0] <= 22f || hsv[0] >= 335f) && hsv[1] >= 0.35f && hsv[2] >= 0.20f) r++;
-                else if (hsv[0] >= 75f && hsv[0] <= 178f && hsv[1] >= 0.22f && hsv[2] >= 0.14f) g++;
-                else if (hsv[2] <= 0.35f && hsv[1] <= 0.50f) k++;
+                boolean isGreenPx = (hsv[0] >= 70f && hsv[0] <= 185f && hsv[1] >= 0.18f && hsv[2] >= 0.12f)
+                        || (cg > cr + 16 && cg > cb + 6 && cg > 45);
+                if (isGreenPx) g++;
+                else if ((hsv[0] <= 22f || hsv[0] >= 335f) && hsv[1] >= 0.35f && hsv[2] >= 0.20f) r++;
+                else if (hsv[2] <= 0.36f && hsv[1] <= 0.50f) k++;
             }
         }
-        if (t < 10) return COL_NONE;
+        if (t < 8) return COL_NONE;
         int rp = r * 100 / t, gp = g * 100 / t, kp = k * 100 / t;
-        if (gp >= 18 && gp > rp) return COL_GRN;
-        if (rp >= 26 && rp >= gp) return COL_RED;
-        if (kp >= 34) return COL_BLK;
+        if (gp >= 10 && gp > rp) return COL_GRN;
+        if (rp >= 25 && rp >= gp) return COL_RED;
+        if (kp >= 32) return COL_BLK;
         return COL_NONE;
     }
 
@@ -46,11 +52,19 @@ public class OcrHelper {
         if (raw == null || col == COL_NONE) return null;
         String s = raw.replace("\n", " ").trim();
         if (s.isEmpty() || s.length() > 3 || s.matches(".*[:.,$%xX₹].*")) return null;
+        s = s.replace(" ", "");
+
+        // Green badge = always 0
         if (col == COL_GRN) return 0;
-        s = s.replace(" ", "").replace('O', '0').replace('o', '0')
+
+        // Allow 0 / O even on dark/black badge (for dark-green 0 badges!)
+        if (col == COL_BLK && (s.equals("0") || s.equalsIgnoreCase("O"))) return 0;
+
+        s = s.replace('O', '0').replace('o', '0')
                 .replace('I', '1').replace('l', '1').replace('|', '1').replace('!', '1');
         if (!s.matches("^[0-9]{1,2}$") || (s.length() == 2 && s.startsWith("0"))) return null;
         int v = Integer.parseInt(s);
+        if (v == 0) return (col == COL_RED) ? null : 0;
         if (v < 1 || v > 36) return null;
         if (col == COL_RED && !isRed(v)) return null;
         if (col == COL_BLK && isRed(v)) return null;
@@ -65,7 +79,7 @@ public class OcrHelper {
             for (int x = 0; x < w; x++) {
                 int c = s.getPixel(x, y);
                 Color.RGBToHSV(Color.red(c), Color.green(c), Color.blue(c), hsv);
-                if (hsv[2] >= 0.62f && hsv[1] <= 0.34f) m[y * w + x] = true;
+                if (hsv[2] >= 0.58f && hsv[1] <= 0.36f) m[y * w + x] = true;
             }
         }
         boolean[] cl = m.clone();
@@ -98,8 +112,8 @@ public class OcrHelper {
                 }
             }
         }
-        boolean[] use = rem >= 8 ? cl : m;
-        if (rem >= 8) {
+        boolean[] use = rem >= 6 ? cl : m;
+        if (rem >= 6) {
             hints[1] = true;
             int dw = mx1 - mx0 + 1, dh = my1 - my0 + 1;
             if (dh >= Math.max(8, h / 3) && dw >= 2 && dw <= Math.round(dh * 0.45f)) hints[0] = true;
