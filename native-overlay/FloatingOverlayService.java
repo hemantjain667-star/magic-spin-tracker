@@ -50,7 +50,7 @@ public class FloatingOverlayService extends Service {
 
     private static final String CH_ID = "magic_spin_overlay_channel";
     private static final int NOTIF_ID = 4109;
-    private static final long OCR_MS = 280L, LOCK_MS = 2000L, REPEAT_SAFE_MS = 10000L;
+    private static final long OCR_MS = 250L, LOCK_MS = 2000L, REPEAT_SAFE_MS = 10000L; // 0.25s fast scan!
     private static final Object Q_LOCK = new Object();
 
     public static class PendingActions {
@@ -137,8 +137,8 @@ public class FloatingOverlayService extends Service {
 
     private List<Integer> lastHist = null;
     private String candSig = null;
-    private Integer lastOcr = null, selNum = null;
-    private int stCnt = 0, curPat = 1, curMult = 1, curStepsRem = 0, curUnit = 0;
+    private Integer lastOcr = null, selNum = null, candN0 = null;
+    private int stCnt = 0, n0StCnt = 0, curPat = 1, curMult = 1, curStepsRem = 0, curUnit = 0;
     private boolean curPlay = false, lastSpinWasHit = false;
     private long lastSubMs = 0L;
     private String ocrTxt = "MANUAL";
@@ -207,7 +207,7 @@ public class FloatingOverlayService extends Service {
 
     private void startFg(boolean mp) {
         Notification n = new NotificationCompat.Builder(this, CH_ID).setContentTitle("Magic Spin Tracker")
-                .setContentText(mp ? "2-Zone Fast History OCR Active" : "Floating Overlay Active").setSmallIcon(android.R.drawable.ic_menu_view).setOngoing(true).build();
+                .setContentText(mp ? "2-Zone Zoom OCR Active" : "Floating Overlay Active").setSmallIcon(android.R.drawable.ic_menu_view).setOngoing(true).build();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) startForeground(NOTIF_ID, n, mp ? ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION : ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
         else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && mp) startForeground(NOTIF_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION);
         else startForeground(NOTIF_ID, n);
@@ -254,9 +254,8 @@ public class FloatingOverlayService extends Service {
         capTh = new HandlerThread("MagicOcr"); capTh.start(); capHdl = new Handler(capTh.getLooper());
         proj.registerCallback(new MediaProjection.Callback() { @Override public void onStop() { uiHdl.post(() -> { stopCap(); updateUI(); }); } }, capHdl);
         DisplayMetrics dm = realDm(); setDisp(dm.widthPixels, dm.heightPixels, dm.densityDpi);
-        capOn = true; autoScan = true; ocrTxt = "READY"; candSig = null; stCnt = 0; nullFrameCnt = 0; lastHist = null; busy.set(false);
+        capOn = true; autoScan = true; ocrTxt = "READY"; candSig = null; candN0 = null; stCnt = 0; n0StCnt = 0; nullFrameCnt = 0; lastHist = null; busy.set(false);
         bcastCap(); updateUI(); tick();
-        Toast.makeText(this, "Yellow line ke LEFT mein naya number aur RIGHT mein purane numbers rakhein!", Toast.LENGTH_LONG).show();
     }
 
     private void stopCap() {
@@ -281,7 +280,7 @@ public class FloatingOverlayService extends Service {
         }, OCR_MS);
     }
 
-    // PARALLEL 2-ZONE OCR: Left Box reads ONLY n0, Right Box reads ONLY verify history!
+    // PARALLEL 2-ZONE ZOOMED OCR with Low-Brightness Auto-Boost + Pass-2 Fallback!
     private void scanFrame() {
         if (proj == null || !boxVis || boxSW <= 0 || boxSH <= 0) return;
         if (lastOcr != null && (System.currentTimeMillis() - lastSubMs) < LOCK_MS) return;
@@ -293,7 +292,7 @@ public class FloatingOverlayService extends Service {
         try {
             img = reader.acquireLatestImage();
             if (img == null) {
-                if (++nullFrameCnt >= 24) uiHdl.post(() -> { ocrTxt = "CAP PAUSED!"; updateUI(); });
+                if (++nullFrameCnt >= 26) uiHdl.post(() -> { ocrTxt = "CAP PAUSED!"; updateUI(); });
                 return;
             }
             nullFrameCnt = 0;
@@ -309,10 +308,6 @@ public class FloatingOverlayService extends Service {
             Bitmap rawBar = Bitmap.createBitmap(full, cx, cy, cw, ch);
             full.recycle();
 
-            final Bitmap mp = Bitmap.createScaledBitmap(rawBar, 96, 26, true);
-            uiHdl.post(() -> { if (previewImg != null) previewImg.setImageBitmap(mp); if (lastPrevBmp != null && !lastPrevBmp.isRecycled()) lastPrevBmp.recycle(); lastPrevBmp = mp; });
-
-            // Split cleanly at the Yellow Divider Line: Left = New Spin ONLY, Right = History Verify ONLY!
             int splitX = Math.min(cw - 8, Math.max(10, Math.round(ch * 1.52f)));
             int leftW = Math.max(6, splitX - 2);
             int rightX = Math.min(cw - 4, splitX + 4);
@@ -322,15 +317,20 @@ public class FloatingOverlayService extends Service {
             Bitmap rightRaw = Bitmap.createBitmap(rawBar, rightX, 0, rightW, ch);
             rawBar.recycle();
 
+            // Show zoomed Left New-Spin box in expanded mini preview!
+            final Bitmap mp = Bitmap.createScaledBitmap(leftRaw, 64, 48, true);
+            uiHdl.post(() -> { if (previewImg != null) previewImg.setImageBitmap(mp); if (lastPrevBmp != null && !lastPrevBmp.isRecycled()) lastPrevBmp.recycle(); lastPrevBmp = mp; });
+
             final int firstCol = OcrHelper.badgeCol(leftRaw);
             if (firstCol == OcrHelper.COL_NONE) {
                 leftRaw.recycle(); rightRaw.recycle();
-                uiHdl.post(() -> { candSig = null; stCnt = 0; ocrTxt = "---: --"; updateUI(); });
+                uiHdl.post(() -> { candSig = null; candN0 = null; stCnt = 0; n0StCnt = 0; ocrTxt = "---: --"; updateUI(); });
                 return;
             }
 
             final boolean[] hints = new boolean[]{false, false};
             final Bitmap leftBw = OcrHelper.cleanLeftSlot(leftRaw, hints);
+            final Bitmap leftBoost = OcrHelper.zoomBoostLeftSlot(leftRaw);
             final Bitmap rightBw = OcrHelper.cleanRightHistory(rightRaw);
             leftRaw.recycle(); rightRaw.recycle();
 
@@ -349,14 +349,28 @@ public class FloatingOverlayService extends Service {
                 }
             };
 
+            // Left New-Spin Box: Pass 1 (220px Adaptive B&W) -> Pass 2 (200px Auto-Brightened Zoom Fallback!)
             ocr.process(InputImage.fromBitmap(leftBw, 0))
                     .addOnSuccessListener(vt -> {
-                        Integer v = OcrHelper.parseLeftSlot(vt.getText(), firstCol);
-                        if (v == null && firstCol == OcrHelper.COL_RED && hints[0]) v = 1;
-                        leftHolder[0] = v;
+                        Integer v1 = OcrHelper.parseLeftSlot(vt.getText(), firstCol);
+                        leftBw.recycle();
+                        if (v1 != null) {
+                            leftBoost.recycle();
+                            leftHolder[0] = v1;
+                            finishBoth.run();
+                        } else {
+                            ocr.process(InputImage.fromBitmap(leftBoost, 0))
+                                    .addOnSuccessListener(vt2 -> {
+                                        Integer v2 = OcrHelper.parseLeftSlot(vt2.getText(), firstCol);
+                                        if (v2 == null && firstCol == OcrHelper.COL_RED && hints[0]) v2 = 1;
+                                        leftHolder[0] = v2;
+                                    })
+                                    .addOnCompleteListener(t2 -> { leftBoost.recycle(); finishBoth.run(); });
+                        }
                     })
-                    .addOnCompleteListener(t -> { leftBw.recycle(); finishBoth.run(); });
+                    .addOnFailureListener(e -> { leftBw.recycle(); leftBoost.recycle(); finishBoth.run(); });
 
+            // Right Verify Zone in parallel
             ocr.process(InputImage.fromBitmap(rightBw, 0))
                     .addOnSuccessListener(vt -> rightHolder[0] = OcrHelper.parseRightHistory(vt))
                     .addOnCompleteListener(t -> { rightBw.recycle(); finishBoth.run(); });
@@ -371,32 +385,26 @@ public class FloatingOverlayService extends Service {
         return true;
     }
 
-    // Strict 2-Zone Verification: ONLY Left Box (n0) adds spins, ONLY Right Box (right) proves a real shift!
     private void onTwoZoneResult(Integer n0, int col, List<Integer> right) {
         if (!autoScan) return;
         long elapsed = System.currentTimeMillis() - lastSubMs;
         if (lastOcr != null && elapsed < LOCK_MS) return;
 
-        // If Left Box couldn't read n0 -> NEVER grab any number from Right Box!
-        if (n0 == null) {
-            candSig = null; stCnt = 0;
-            ocrTxt = OcrHelper.cTag(col) + ": --"; updateUI(); return;
-        }
-        // Require at least 2 numbers in Right Verify Box -> blocks false 0 / fake spins when switching apps!
-        if (right == null || right.size() < 2) {
-            candSig = null; stCnt = 0;
-            ocrTxt = OcrHelper.cTag(col) + " BAR?"; updateUI(); return;
-        }
+        if (n0 == null) { candSig = null; candN0 = null; stCnt = 0; n0StCnt = 0; ocrTxt = OcrHelper.cTag(col) + ": --"; updateUI(); return; }
+        if (right == null || right.size() < 2) { candSig = null; candN0 = null; stCnt = 0; n0StCnt = 0; ocrTxt = OcrHelper.cTag(col) + " BAR?"; updateUI(); return; }
 
         List<Integer> cur = new ArrayList<>(); cur.add(n0); cur.addAll(right);
 
-        // 1. Same sequence as last spin -> STRICT HOLD (0% double!)
+        // 1. Same sequence -> STRICT HOLD (0% double!)
         if (lastHist != null && sameHead(cur, lastHist)) {
-            candSig = null; stCnt = 0;
+            candSig = null; candN0 = null; stCnt = 0; n0StCnt = 0;
             ocrTxt = OcrHelper.cTag(col) + " HOLD:" + n0; updateUI(); return;
         }
 
-        // 2. INSTANT SHIFT BY 1 (~0.3s!): old winning number moved into right[0], old slot #2 into right[1]!
+        // Track 2 consecutive identical reads of n0 (0.5s total -> stops 34->32 fade-in misread!)
+        if (n0.equals(candN0)) n0StCnt++; else { candN0 = n0; n0StCnt = 1; }
+
+        // 2. SHIFT BY 1 (~0.5s fast + 2-frame n0 confirmation -> NEVER misreads 34 as 32!)
         if (lastHist != null && lastHist.size() >= 2) {
             boolean m0 = right.get(0).equals(lastHist.get(0));
             boolean m1 = right.get(1).equals(lastHist.get(1));
@@ -405,28 +413,32 @@ public class FloatingOverlayService extends Service {
                 if (lastOcr != null && lastOcr.equals(n0) && elapsed < REPEAT_SAFE_MS) {
                     ocrTxt = OcrHelper.cTag(col) + " HOLD:" + n0; updateUI(); return;
                 }
-                lastHist = cur; candSig = null; stCnt = 0;
+                if (n0StCnt < 2) {
+                    ocrTxt = OcrHelper.cTag(col) + " " + n0 + " (1/2)"; updateUI(); return;
+                }
+                lastHist = cur; candSig = null; candN0 = null; stCnt = 0; n0StCnt = 0;
                 ocrTxt = OcrHelper.cTag(col) + " ADD:" + n0;
                 submitSpin(n0, "ocr"); return;
             }
         }
 
-        // 3. INSTANT SHIFT BY 2 (Auto-recovers 1 missed spin cleanly!)
+        // 3. SHIFT BY 2 (Auto-recovers 1 missed spin cleanly after 2 steady n0 frames!)
         if (lastHist != null && right.size() >= 3 && lastHist.size() >= 2
                 && right.get(1).equals(lastHist.get(0)) && right.get(2).equals(lastHist.get(1))) {
-            lastHist = cur; candSig = null; stCnt = 0;
+            if (n0StCnt < 2) { ocrTxt = OcrHelper.cTag(col) + " +2?"; updateUI(); return; }
+            lastHist = cur; candSig = null; candN0 = null; stCnt = 0; n0StCnt = 0;
             submitSpin(right.get(0), "ocr");
             submitSpin(n0, "ocr");
             ocrTxt = OcrHelper.cTag(col) + " +2:" + n0; updateUI(); return;
         }
 
-        // 4. First spin ever OR brand new table (require 3+ right numbers steady for 2-4 frames)
+        // 4. First spin ever OR switched table
         String sig = cur.toString();
         if (sig.equals(candSig)) stCnt++; else { candSig = sig; stCnt = 1; }
 
         if (lastHist == null) {
             if (right.size() >= 3 && stCnt >= 2) {
-                lastHist = cur; candSig = null; stCnt = 0;
+                lastHist = cur; candSig = null; candN0 = null; stCnt = 0; n0StCnt = 0;
                 ocrTxt = OcrHelper.cTag(col) + " ADD:" + n0;
                 submitSpin(n0, "ocr"); return;
             }
@@ -434,7 +446,7 @@ public class FloatingOverlayService extends Service {
         }
 
         if (!n0.equals(lastHist.get(0)) && right.size() >= 3 && stCnt >= 4) {
-            lastHist = cur; candSig = null; stCnt = 0;
+            lastHist = cur; candSig = null; candN0 = null; stCnt = 0; n0StCnt = 0;
             ocrTxt = OcrHelper.cTag(col) + " ADD:" + n0;
             submitSpin(n0, "ocr"); return;
         }
@@ -479,7 +491,7 @@ public class FloatingOverlayService extends Service {
     private void performUndo() {
         if (!undoLastSpinSync(this)) { Toast.makeText(this, "Undo ke liye koi spin nahi", Toast.LENGTH_SHORT).show(); return; }
         recalc(); loadLast5(); lastOcr = l5Nums.isEmpty() ? null : l5Nums.get(0);
-        lastSubMs = 0L; lastHist = null; candSig = null; stCnt = 0; tpFired = false; slFired = false;
+        lastSubMs = 0L; lastHist = null; candSig = null; candN0 = null; stCnt = 0; n0StCnt = 0; tpFired = false; slFired = false;
         updateUI(); sendBroadcast(new Intent(ACTION_UNDO_REQUESTED).setPackage(getPackageName()));
         Toast.makeText(this, "UNDO -> " + curPat + "P | " + curMult + "X", Toast.LENGTH_SHORT).show();
     }
@@ -530,9 +542,7 @@ public class FloatingOverlayService extends Service {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) boxParams.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
 
         scanBox = new FrameLayout(this); scanBox.setBackground(bg("#00000000", boxLock ? "#38BDF8" : "#22C55E", 2, 4));
-        // Yellow vertical divider separating Left [NEW SPIN] box from Right [VERIFY HISTORY] box!
-        dividerLine = new View(this);
-        dividerLine.setBackgroundColor(Color.parseColor("#FACC15"));
+        dividerLine = new View(this); dividerLine.setBackgroundColor(Color.parseColor("#FACC15"));
         FrameLayout.LayoutParams dlp = new FrameLayout.LayoutParams(dp(2), -1, Gravity.TOP | Gravity.START);
         dlp.leftMargin = Math.round(boxParams.height * 1.52f);
         scanBox.addView(dividerLine, dlp);
@@ -628,7 +638,7 @@ public class FloatingOverlayService extends Service {
         LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(-1, dp(26)); tlp.bottomMargin = dp(2); top.setLayoutParams(tlp);
         Button col = mkBtn("-", "#334155", "#475569", dp(22), dp(24)); col.setOnClickListener(v -> setExp(false));
         previewImg = new ImageView(this); previewImg.setScaleType(ImageView.ScaleType.FIT_CENTER); previewImg.setBackground(bg("#000000", "#22C55E", 1, 4));
-        LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(dp(48), dp(22)); plp.leftMargin = dp(2); previewImg.setLayoutParams(plp);
+        LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(dp(34), dp(24)); plp.leftMargin = dp(2); previewImg.setLayoutParams(plp);
         selText = mkTxt(10f); selText.setText("--"); selText.setTextColor(Color.parseColor("#FACC15")); selText.setBackground(bg("#080D17", "#38BDF8", 1, 4));
         LinearLayout.LayoutParams stlp = new LinearLayout.LayoutParams(0, dp(24), 1f); stlp.leftMargin = dp(2); stlp.rightMargin = dp(2); selText.setLayoutParams(stlp);
         Button undo = mkBtn("U", "#B45309", "#F59E0B", dp(24), dp(24)); undo.setTextSize(8.5f);
